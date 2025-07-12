@@ -2,9 +2,61 @@ import streamlit as st
 import pandas as pd
 from io import BytesIO
 from datetime import datetime
+from helpers import get_connection
 from helpers.file_reader import read_any_file
 
 st.set_page_config(page_title="Licitados", page_icon="📑")
+
+
+@st.cache_data(show_spinner=False)
+def load_licitados() -> pd.DataFrame:
+    """Consulta la vista de beneficios y devuelve la base completa."""
+    conn = get_connection(
+        server="PUACSCLBI.uniacc.local",
+        database="UConectores",
+        user="usr_dwhppto",
+        password="g8)yT1m23u7H",
+    )
+    query = """
+        SELECT
+            CAST(RUT AS varchar(50))               AS RUT,
+            UPPER(DV)                              AS DV,
+            UPPER(APELLIDO_PATERNO)                AS APELLIDO_PATERNO,
+            UPPER(APELLIDO_MATERNO)                AS APELLIDO_MATERNO,
+            UPPER(NOMBRES)                         AS NOMBRES,
+            UPPER(SEXO)                            AS SEXO,
+            CONVERT(char(10), TRY_CONVERT(date, FECHA_NACIMIENTO), 103) AS FECHA_NACIMIENTO,
+            UPPER(DIRECCION)                       AS DIRECCION,
+            RIGHT(REPLICATE('0', 5) + CAST(CIUDAD AS varchar(50)), 5)  AS CIUDAD,
+            RIGHT(REPLICATE('0', 5) + CAST(COMUNA AS varchar(50)), 5)  AS COMUNA,
+            RIGHT(REPLICATE('0', 2) + CAST(REGION AS varchar(50)), 2)  AS REGION,
+            RIGHT(REPLICATE('0', 2) + CAST(COD_AREA AS varchar(50)), 2) AS COD_AREA,
+            RIGHT(REPLICATE('0', 8) + CAST(FONO_FIJO AS varchar(50)), 8) AS FONO_FIJO,
+            RIGHT(REPLICATE('0', 9) + CAST(CELULAR AS varchar(50)), 9) AS CELULAR,
+            UPPER(EMAIL)                           AS EMAIL,
+            RIGHT(REPLICATE('0', 1) + CAST(CODIGO_TIPO_IES AS varchar(50)), 1) AS CODIGO_TIPO_IES,
+            RIGHT(REPLICATE('0', 3) + CAST(CODIGO_DE_IES AS varchar(50)), 3)   AS CODIGO_IES,
+            RIGHT(REPLICATE('0', 3) + CAST(CODIGO_SEDE AS varchar(50)), 3)     AS CODIGO_SEDE,
+            RIGHT(REPLICATE('0', 4) + CAST(CODIGO_CARRERA AS varchar(50)), 4)  AS CODIGO_CARRERA,
+            RIGHT(REPLICATE('0', 1) + CAST(JORNADA AS varchar(50)), 1) AS JORNADA,
+            RIGHT(REPLICATE('0', 4) + CAST(AÑO_INGRESO_CARRERA AS varchar(50)), 4) AS AÑO_INGRESO_CARRERA,
+            RIGHT(REPLICATE('0', 1) + CAST(NIVEL_DE_ESTUDIOS AS varchar(50)), 1) AS NIVEL_DE_ESTUDIOS,
+            RIGHT(REPLICATE('0',10) + CAST(ARANCEL_SOLICITADO AS varchar(50)),10) AS ARANCEL_SOLICITADO,
+            RIGHT(REPLICATE('0',10) + CAST(ARANCEL_REAL AS varchar(50)),10) AS ARANCEL_REAL,
+            UPPER(COMPROBANTE_MATRICULA) AS COMPROBANTE_MATRICULA,
+            CONVERT(char(10), TRY_CONVERT(date, FECHA_ÚLTIMA_MATRICULA), 103) AS FECHA_ULTIMA_MATRICULA,
+            RIGHT(REPLICATE('0', 2) + CAST(REGION_SEDE AS varchar(50)), 2) AS REGION_SEDE,
+            RIGHT(REPLICATE('0', 5) + CAST(COMUNA_SEDE AS varchar(50)), 5) AS COMUNA_SEDE,
+            RIGHT(REPLICATE('0', 5) + CAST(CIUDAD_SEDE AS varchar(50)), 5) AS CIUDAD_SEDE,
+            UPPER(DIRECCIÓN_SEDE) AS DIRECCION_SEDE,
+            PORCENTAJE_AVANCE,
+            CODIGO_UNICO_MINEDUC,
+            AÑO_INGRESO_CARRERA
+        FROM dbo.vw_beneficios
+    """
+    df = pd.read_sql_query(query, conn)
+    conn.close()
+    return df
 
 
 def to_excel_bytes(df: pd.DataFrame) -> BytesIO:
@@ -142,12 +194,33 @@ def process_licitados_2(df_licitados: pd.DataFrame, df_csv: pd.DataFrame, year_r
 
 
 def process_licitados_3(df_licitados: pd.DataFrame, df_csv: pd.DataFrame):
+    """Cruce de renovantes (proceso #3).
+
+    Separa los registros que cumplen las condiciones de renovante anterior de
+    aquellos que no las cumplen.
+    """
+
     df_licitados = df_licitados.copy()
     df_csv = df_csv.copy()
+
     df_licitados["PORCENTAJE_AVANCE"] = df_licitados["PORCENTAJE_AVANCE"].round(0)
     df_licitados["RUT"] = df_licitados["RUT"].astype(str)
     df_csv["RUT"] = df_csv["RUT"].astype(str)
-    return pd.merge(df_licitados, df_csv, on="RUT", how="inner")
+    df_csv = df_csv[["RUT", "IESN_COD", "ESTADO_RENOVANTE", "CONTADOR_CAMBIOS"]]
+
+    df_cruce = pd.merge(df_licitados, df_csv, on="RUT", how="inner")
+
+    mask_iesn_13 = df_cruce["IESN_COD"] == 13
+    mask_iesn_no_13 = df_cruce["IESN_COD"] != 13
+    mask_estado_ok = ~df_cruce["ESTADO_RENOVANTE"].isin([7, 10, 11, 14, 15])
+    mask_contador_ok = df_cruce["CONTADOR_CAMBIOS"] == 0
+
+    mask_cumple = mask_iesn_13 | (mask_iesn_no_13 & mask_estado_ok & mask_contador_ok)
+
+    df_cumple = df_cruce[mask_cumple].copy()
+    df_no_cumple = df_cruce[~mask_cumple].copy()
+
+    return df_cruce, df_cumple, df_no_cumple
 
 
 def process_rut(df_licitados: pd.DataFrame, df_csv: pd.DataFrame):
@@ -169,6 +242,10 @@ st.session_state["anio"] = int(anio)
 base_file = st.file_uploader("Cargar base de licitados", type=["csv", "xlsx"], key="base")
 if base_file:
     st.session_state["df_licitados"] = read_any_file(base_file)
+
+if "df_licitados" not in st.session_state:
+    with st.spinner("Consultando base de licitados..."):
+        st.session_state["df_licitados"] = load_licitados()
 
 df_licitados = st.session_state.get("df_licitados")
 if df_licitados is not None:
@@ -259,13 +336,25 @@ with st.expander("Sub-proceso #3 - No seleccionados"):
     if file3 and df_licitados is not None:
         df3 = read_any_file(file3)
         if df3 is not None:
-            res3 = process_licitados_3(df_licitados, df3)
+            res3, cumple3, no_cumple3 = process_licitados_3(df_licitados, df3)
             st.session_state["res3"] = res3
+            st.session_state["cumple3"] = cumple3
+            st.session_state["nocumple3"] = no_cumple3
             st.success(f"Registros cruce: {len(res3)}")
             st.download_button(
                 "Exportar cruce con Matrícula",
                 to_excel_bytes(res3),
                 "Licitados_NoSeleccionados_3.xlsx",
+            )
+            st.download_button(
+                "Exportar Cumple",
+                to_excel_bytes(cumple3),
+                "Licitados_3_cumple.xlsx",
+            )
+            st.download_button(
+                "Exportar No cumple",
+                to_excel_bytes(no_cumple3),
+                "Licitados_3_no_cumple.xlsx",
             )
             if df_extra is not None:
                 cruz = pd.merge(res3, df_extra, on="RUT", how="inner")
