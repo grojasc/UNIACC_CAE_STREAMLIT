@@ -1379,7 +1379,9 @@ class LicitadosFrame(tk.Frame):
         self.controller = controller
         self.config(bg="#FFFFFF")
         self.anio_ingresado = tk.StringVar(value=_dt.datetime.now().year)  # valor por defecto
-        self.current_year   = int(self.anio_ingresado.get()) 
+        self.current_year   = int(self.anio_ingresado.get())
+        # Filtro opcional por CODIGO_IES
+        self.codigo_ies_var = tk.StringVar(value="")
         # Se asume que df_licitados está declarado globalmente
         global df_licitados
         ## NUEVO
@@ -1408,14 +1410,18 @@ class LicitadosFrame(tk.Frame):
         self.df_resultado_rut = None
         self.df_resultado_cruce_rut = None
         self.df_resultado_no_cruce_rut = None
+        self.df_csv_1 = None
+        self.df_csv_2 = None
+        self.df_csv_3 = None
 
         #
         # Layout base
         #
-        # Aumentamos a 12 filas y 5 columnas para acomodar los botones extra
+        # Aumentamos a 12 filas y 8 columnas para acomodar los botones extra
         for row_idx in range(12):
             self.rowconfigure(row_idx, weight=1)
-        for col_idx in range(5):
+        # aumentamos a 8 columnas por los nuevos controles
+        for col_idx in range(8):
             self.columnconfigure(col_idx, weight=1)
 
         tk.Label(
@@ -1429,6 +1435,17 @@ class LicitadosFrame(tk.Frame):
 
         tk.Entry(self, textvariable=self.anio_ingresado, width=6)\
             .grid(row=0, column=2, sticky="w")
+
+        tk.Label(self, text="Código IES:", bg="#FFFFFF")\
+            .grid(row=0, column=4, sticky="e")
+        tk.Entry(self, textvariable=self.codigo_ies_var, width=6)\
+            .grid(row=0, column=5, sticky="w")
+
+        tk.Button(
+            self, text="Filtrar",
+            command=self.apply_filter,
+            bg="#107FFD", fg="white", width=8
+        ).grid(row=0, column=6, padx=5, sticky="w")
 
         # NUEVO: Botón “Guardar” a la derecha del Entry
         tk.Button(
@@ -1445,7 +1462,7 @@ class LicitadosFrame(tk.Frame):
             fg="white",
             command=self.exportar_duplicados
         )
-        self.btn_exportar_duplicados.grid(row=0, column=5, padx=5, pady=5, sticky="e")
+        self.btn_exportar_duplicados.grid(row=0, column=7, padx=5, pady=5, sticky="e")
 
         #
         # 1) Botón para cargar el archivo EXTRA (refinanciamiento)
@@ -1492,13 +1509,25 @@ class LicitadosFrame(tk.Frame):
         )
         self.btn_export_1_c.grid(row=4, column=4, padx=5, pady=5)
 
+        self.btn_run_1 = tk.Button(
+            self, text="Run #1", bg="#cccccc", fg="white", state="disabled",
+            command=self.run_licitados_1
+        )
+        self.btn_run_1.grid(row=4, column=5, padx=5, pady=5)
+
+        self.btn_preview_1 = tk.Button(
+            self, text="Preview", bg="#cccccc", fg="white",
+            command=lambda: self._show_df(self.df_csv_1, "Preview #1")
+        )
+        self.btn_preview_1.grid(row=4, column=6, padx=5, pady=5)
+
         self.btn_usa_extra_1 = tk.Button(
             self, text="Cruzar con Refinanciamiento", bg="#cccccc", fg="white",
             state="disabled",
             command=self.operar_con_extra_1
         )
         ####
-        self.btn_usa_extra_1.grid(row=5, column=0, columnspan=5, pady=5)
+        self.btn_usa_extra_1.grid(row=5, column=0, columnspan=8, pady=5)
 
         #
         # Sub-proceso #2
@@ -1531,12 +1560,24 @@ class LicitadosFrame(tk.Frame):
         )
         self.btn_export_2_c.grid(row=2, column=4, padx=5, pady=5)
 
+        self.btn_run_2 = tk.Button(
+            self, text="Run #2", bg="#cccccc", fg="white", state="disabled",
+            command=self.run_licitados_2
+        )
+        self.btn_run_2.grid(row=2, column=5, padx=5, pady=5)
+
+        self.btn_preview_2 = tk.Button(
+            self, text="Preview", bg="#cccccc", fg="white",
+            command=lambda: self._show_df(self.df_csv_2, "Preview #2")
+        )
+        self.btn_preview_2.grid(row=2, column=6, padx=5, pady=5)
+
         self.btn_usa_extra_2 = tk.Button(
             self, text="Cruzar con refinanciamiento", bg="#cccccc", fg="white",
             state="disabled",
             command=self.operar_con_extra_2
         )
-        self.btn_usa_extra_2.grid(row=3, column=0, columnspan=5, pady=5)
+        self.btn_usa_extra_2.grid(row=3, column=0, columnspan=8, pady=5)
 
         #
         # Sub-proceso #3
@@ -1555,12 +1596,24 @@ class LicitadosFrame(tk.Frame):
         )
         self.btn_export_3.grid(row=6, column=2, padx=5, pady=5)
 
+        self.btn_run_3 = tk.Button(
+            self, text="Run #3", bg="#cccccc", fg="white", state="disabled",
+            command=self.run_licitados_3
+        )
+        self.btn_run_3.grid(row=6, column=5, padx=5, pady=5)
+
+        self.btn_preview_3 = tk.Button(
+            self, text="Preview", bg="#cccccc", fg="white",
+            command=lambda: self._show_df(self.df_csv_3, "Preview #3")
+        )
+        self.btn_preview_3.grid(row=6, column=6, padx=5, pady=5)
+
         self.btn_usa_extra_3 = tk.Button(
             self, text="Cruzar con refinanciamiento", bg="#cccccc", fg="white",
             state="disabled",
             command=self.operar_con_extra_3
         )
-        self.btn_usa_extra_3.grid(row=7, column=0, columnspan=3, pady=5)
+        self.btn_usa_extra_3.grid(row=7, column=0, columnspan=8, pady=5)
 
         #
         # Sub-proceso #3b (opcional)
@@ -1637,6 +1690,19 @@ class LicitadosFrame(tk.Frame):
         except ValueError:
             messagebox.showerror("Error",
                                  "Ingresa un año numérico válido (-ej. 2025-).")
+
+    def apply_filter(self):
+        """Filtra df_licitados por CODIGO_IES si se ingresó un valor."""
+        global df_licitados
+        codigo = self.codigo_ies_var.get().strip()
+        if df_licitados is None:
+            messagebox.showwarning("Sin datos", "df_licitados está vacío.")
+            return
+        if codigo:
+            self.df_licitados_query = df_licitados[df_licitados["CODIGO_IES"].astype(str) == codigo]
+        else:
+            self.df_licitados_query = df_licitados
+        messagebox.showinfo("Filtrado", f"Registros: {len(self.df_licitados_query)}")
     def load_file_extra(self):
         df_csv, file_path = read_any_file("Seleccionar CSV/TXT/Excel - Archivo EXTRA (Refinanciamiento)")
         if df_csv is None:
@@ -1696,97 +1762,67 @@ class LicitadosFrame(tk.Frame):
             return
         if "MOROSOS" not in df_csv.columns:
             df_csv['MOROSOS'] = ""
+        self.df_csv_1 = df_csv.copy()
         self.label_file_1.config(text=f"Archivo #1: {os.path.basename(file_path)}")
+        messagebox.showinfo("Archivo cargado", f"{len(df_csv)} filas cargadas")
+        self.btn_run_1.config(state="normal", bg="#107FFD")
+        self.btn_preview_1.config(bg="#107FFD")
 
+    def run_licitados_1(self):
         global df_licitados
+        if self.df_csv_1 is None:
+            messagebox.showwarning("Sin archivo", "Primero carga el archivo #1.")
+            return
         if df_licitados is None or df_licitados.empty:
             messagebox.showwarning("Sin datos", "df_licitados está vacío.")
             return
-        
+
         df_licitados["RUT"] = df_licitados["RUT"].astype(str)
         df_licitados["PORCENTAJE_AVANCE"] = df_licitados['PORCENTAJE_AVANCE'].round(0)
-        
-        # 2️⃣ Rellena con ceros a la izquierda hasta 8 dígitos
-        df_csv["RUT"] = df_csv["RUT"].astype(str)
-        #df_csv["RUT"] = df_csv["RUT"].str.zfill(8)
 
-        # Aquí seleccionas las columnas que necesites. Como ejemplo:
-        # df_licitados = df_licitados[["RUT", "NOMBRE_IES_RESPALDO", ...]]
-        
+        df_csv = self.df_csv_1.copy()
+        df_csv["RUT"] = df_csv["RUT"].astype(str)
+        df_csv = df_csv.rename(columns={"GLOSA_NUEVA": "GLOSA_NUEVO", "GLOSA_SUPERIO": "GLOSA_SUPERIOR"})
         df_csv = df_csv[['RUT', 'IES_RESPALDO', 'NOMBRE_IES_RESPALDO','GLOSA_NUEVO','GLOSA_SUPERIOR','NO_VIDENTE','ESTUDIOS_EXTRANJEROS','EXTRANJERO','INFORMADO_CON_BEA','PSU_USADA','ACREDITACION_EXTRANJEROS_PDI','MOROSOS']]
 
-        self.df_resultado_1 = pd.merge(df_licitados, df_csv, on="RUT", how="inner")
+        self.df_resultado_1 = pd.merge(self.df_licitados_query, df_csv, on="RUT", how="inner")
         self.df_resultado_1["RUT"] = self.df_resultado_1["RUT"].str.zfill(8)
-        cond_gnew = (self.df_resultado_1['GLOSA_NUEVO'] == "Seleccionado Normal ESTADO_SELECCION = 1 - 2 - 3") ## cumple una o la otra
+        cond_gnew = (self.df_resultado_1['GLOSA_NUEVO'] == "Seleccionado Normal ESTADO_SELECCION = 1 - 2 - 3")
         cond_gsup = (self.df_resultado_1['GLOSA_SUPERIOR'] == "Seleccionado Normal ESTADO_SELECCION = 1 - 2 - 3")
-
-        # IES_RESPALDO debe ser 13
         cond_ies = (self.df_resultado_1['CODIGO_IES'] == '013')
-
-        # Máscara final: Todas las condiciones se deben cumplir
         mask_final = (cond_gnew | cond_gsup) & cond_ies
 
-        # =======================================
-        # 3) SEPARAR DATAFRAMES (CUMPLE / NO)
-        # =======================================
         df_cumple = self.df_resultado_1[mask_final].copy()
         df_no_cumple = self.df_resultado_1[~mask_final].copy()
         self.df_resultado_no_cruce_1 = df_no_cumple
-        # =============================================
-        # 4) CREAR COLUMNA "OBSERVACIONES" EN df_cumple
-        # =============================================
+
         def generar_observacion(row):
             observaciones = []
-
-            # 1) no vidente
             if row.get('NO_VIDENTE', 0) == 1:
                 observaciones.append("no vidente")
-
-            # 2) estudios extranjeros
             if row.get('ESTUDIOS_EXTRANJEROS', 0) == 1:
                 observaciones.append("estudios extranjeros")
-
-            # 3) extranjeros PDI (si EXTRANJERO == 1 o ACREDITACION_EXTRANJEROS_PDI == 1)
             extranjero_flag = (row.get('EXTRANJERO', 0) == 1) or (row.get('ACREDITACION_EXTRANJEROS_PDI', 0) == 1)
             if extranjero_flag:
                 observaciones.append("extranjeros PDI")
-
-            # 4) BEA
             if row.get('INFORMADO_CON_BEA', 0) == 1:
                 observaciones.append("BEA")
-
-            # 5) cumple PSU
             psu_val = row.get('PSU_USADA', 0)
-            if pd.notnull(psu_val/100) and psu_val >= 485: # revisar!!
+            if pd.notnull(psu_val/100) and psu_val >= 485:
                 observaciones.append("cumple PSU")
-
-           # # 6) moroso
             if row.get('MOROSO', 0) == 1:
-               observaciones.append("morosos")
-
-            # Para evitar duplicados si EXTRANJERO y ACREDITACION_EXTRANJEROS_PDI son ambos 1
+                observaciones.append("morosos")
             observaciones_unicas = list(dict.fromkeys(observaciones))
             return ", ".join(observaciones_unicas)
 
         df_cumple['OBSERVACIONES'] = df_cumple.apply(generar_observacion, axis=1)
         self.df_resultado_cruce_1 = df_cumple
-        # ===========================
-        # 5) RESULTADO FINAL
-        # ===========================
-        print("Registros que CUMPLEN condiciones:", len(df_cumple))
-        print("Registros que NO CUMPLEN condiciones:", len(df_no_cumple))
-
-        # df_cumple => Contiene los casos válidos con observaciones
-        # df_no_cumple => Contiene los casos que no cumplieron
-
-        df_seleccionados = df_cumple.reset_index(drop=True)
-        df_seleccionados
-
 
         self.btn_export_1.config(bg="#107FFD")
         self.btn_export_1_b.config(bg="#107FFD")
         self.btn_export_1_c.config(bg="#107FFD")
         self.enable_extra_buttons()
+        messagebox.showinfo("Procesado", f"CUMPLE: {len(df_cumple)} | NO CUMPLE: {len(df_no_cumple)}")
 
     def export_licitados_1(self):
         if self.df_resultado_1 is None:
@@ -1827,23 +1863,28 @@ class LicitadosFrame(tk.Frame):
         if "RUT" not in df_csv.columns:
             messagebox.showerror("Error", "El archivo #2 no contiene 'RUT'.")
             return
-
+        self.df_csv_2 = df_csv.copy()
         self.label_file_2.config(text=f"Archivo #2: {os.path.basename(file_path)}")
+        messagebox.showinfo("Archivo cargado", f"{len(df_csv)} filas cargadas")
+        self.btn_run_2.config(state="normal", bg="#107FFD")
+        self.btn_preview_2.config(bg="#107FFD")
 
+    def run_licitados_2(self):
         global df_licitados
+        if self.df_csv_2 is None:
+            messagebox.showwarning("Sin archivo", "Primero carga el archivo #2.")
+            return
         if df_licitados is None or df_licitados.empty:
             messagebox.showwarning("Sin datos", "df_licitados está vacío.")
             return
-        # 2️⃣ Rellena con ceros a la izquierda hasta 8 dígitos
-        
+
         df_licitados["PORCENTAJE_AVANCE"] = df_licitados['PORCENTAJE_AVANCE'].round(0)
-        
-        # Aquí seleccionas las columnas que necesites. Como ejemplo:
-        # df_licitados = df_licitados[["RUT", "NOMBRE_IES_RESPALDO", ...]]
+        df_csv = self.df_csv_2.copy()
         df_csv["RUT"] = df_csv["RUT"].astype(str)
+        df_csv = df_csv.rename(columns={"GLOSA_NUEVA": "GLOSA_NUEVO", "GLOSA_SUPERIO": "GLOSA_SUPERIOR"})
         df_csv = df_csv[['RUT', 'IES_RESPALDO', 'NOMBRE_IES_RESPALDO','GLOSA_NUEVO','GLOSA_SUPERIOR','NO_VIDENTE','ESTUDIOS_EXTRANJEROS','EXTRANJERO','INFORMADO_CON_BEA','PSU_USADA','ACREDITACION_EXTRANJEROS_PDI','MOROSO']]
 
-        df_cruce = pd.merge(df_licitados, df_csv, on="RUT", how="inner")
+        df_cruce = pd.merge(self.df_licitados_query, df_csv, on="RUT", how="inner")
         print(len(df_cruce))
         # =============================
         # 2) Definir condiciones y FILTROS
@@ -1993,20 +2034,29 @@ class LicitadosFrame(tk.Frame):
         if "RUT" not in df_csv.columns:
             messagebox.showerror("Error", "El archivo #3 no contiene la columna 'RUT'.")
             return
-
+        self.df_csv_3 = df_csv.copy()
         self.label_file_3.config(text=f"Archivo #3: {os.path.basename(file_path)}")
+        messagebox.showinfo("Archivo cargado", f"{len(df_csv)} filas cargadas")
+        self.btn_run_3.config(state="normal", bg="#107FFD")
+        self.btn_preview_3.config(bg="#107FFD")
 
+    def run_licitados_3(self):
         global df_licitados
+        if self.df_csv_3 is None:
+            messagebox.showwarning("Sin archivo", "Primero carga el archivo #3.")
+            return
         if df_licitados is None or df_licitados.empty:
             messagebox.showwarning("Sin datos", "df_licitados está vacío.")
             return
         df_licitados["PORCENTAJE_AVANCE"] = df_licitados['PORCENTAJE_AVANCE'].round(0)
         df_licitados["RUT"] = df_licitados["RUT"].astype(str)
+        df_csv = self.df_csv_3.copy()
         df_csv["RUT"] = df_csv["RUT"].astype(str)
 
-        self.df_resultado_3 = pd.merge(df_licitados, df_csv, on="RUT", how="inner")
+        self.df_resultado_3 = pd.merge(self.df_licitados_query, df_csv, on="RUT", how="inner")
         self.btn_export_3.config(bg="#107FFD")
         self.enable_extra_buttons()
+        messagebox.showinfo("Procesado", f"Registros: {len(self.df_resultado_3)}")
 
     def export_licitados_3(self):
         if self.df_resultado_3 is None:
@@ -2149,6 +2199,26 @@ class LicitadosFrame(tk.Frame):
         else:
             messagebox.showinfo("Cancelado", "No se exportó el archivo.")
 
+    def _show_df(self, df, title):
+        if df is None or df.empty:
+            messagebox.showinfo("Sin datos", "No hay datos para mostrar.")
+            return
+        win = tk.Toplevel(self)
+        win.title(title)
+        frame = ttk.Frame(win)
+        frame.pack(fill="both", expand=True)
+        cols = list(df.columns)
+        tree = ttk.Treeview(frame, columns=cols, show="headings")
+        vsb = ttk.Scrollbar(frame, orient="vertical", command=tree.yview)
+        tree.configure(yscrollcommand=vsb.set)
+        tree.pack(side="left", fill="both", expand=True)
+        vsb.pack(side="right", fill="y")
+        for c in cols:
+            tree.heading(c, text=c)
+            tree.column(c, width=120, anchor="w")
+        for _, row in df.head(50).iterrows():
+            tree.insert("", "end", values=[row[c] for c in cols])
+
 
 
 class IngresaRenovantesFrame(tk.Frame):
@@ -2166,6 +2236,8 @@ class IngresaRenovantesFrame(tk.Frame):
         # df_licitados se asume global
         global df_licitados
         self.df_licitados_query = df_licitados
+        # filtro opcional CODIGO_IES
+        self.codigo_ies_var = tk.StringVar(value="")
 
         # DataFrame donde se cargará el archivo extra
         self.df_extra = None
@@ -2183,19 +2255,35 @@ class IngresaRenovantesFrame(tk.Frame):
         self.df_resultado_cruce_3 = None
         self.df_resultado_no_cruce_3 = None
 
+        # CSV temporales
+        self.df_csv_1 = None
+        self.df_csv_2 = None
+        self.df_csv_3 = None
+        self.df_csv_4 = None
+        self.df_csv_5 = None
+
         #
         # Layout base
         #
         for row_idx in range(15):
             self.rowconfigure(row_idx, weight=1)
-        # Ampliamos las columnas de 3 a 5 (tal como en la clase Licitados) 
-        for col_idx in range(5):
+        # Aumentamos a 8 columnas por nuevos controles
+        for col_idx in range(8):
             self.columnconfigure(col_idx, weight=1)
 
         tk.Label(
             self, text="RENOVANTES", font=("Arial", 16, "bold"),
             bg="#FFFFFF"
-        ).grid(row=0, column=0, columnspan=5, pady=10)
+        ).grid(row=0, column=0, padx=5)
+
+        tk.Label(self, text="Código IES:", bg="#FFFFFF")\
+            .grid(row=0, column=1, sticky="e")
+        tk.Entry(self, textvariable=self.codigo_ies_var, width=6)\
+            .grid(row=0, column=2, sticky="w")
+        tk.Button(
+            self, text="Filtrar", command=self.apply_filter,
+            bg="#107FFD", fg="white", width=8
+        ).grid(row=0, column=3, padx=5, sticky="w")
 
         #
         # 1) Botón para cargar el archivo EXTRA (df_extra)
@@ -2207,7 +2295,7 @@ class IngresaRenovantesFrame(tk.Frame):
         btn_cargar_extra.grid(row=1, column=0, padx=5, pady=5, sticky="w")
 
         self.label_file_extra = tk.Label(self, text="Sin archivo de refinanciamiento", bg="#FFFFFF")
-        self.label_file_extra.grid(row=1, column=1, columnspan=4, padx=5, pady=5, sticky="w")
+        self.label_file_extra.grid(row=1, column=1, columnspan=6, padx=5, pady=5, sticky="w")
 
         #
         # Sub-proceso #1
@@ -2227,12 +2315,24 @@ class IngresaRenovantesFrame(tk.Frame):
         )
         self.btn_export_1.grid(row=2, column=2, padx=5, pady=5)
 
+        self.btn_run_1 = tk.Button(
+            self, text="Run #1", bg="#cccccc", fg="white", state="disabled",
+            command=self.run_1
+        )
+        self.btn_run_1.grid(row=2, column=3, padx=5, pady=5)
+
+        self.btn_preview_1 = tk.Button(
+            self, text="Preview", bg="#cccccc", fg="white",
+            command=lambda: self._show_df(self.df_csv_1, "Preview #1")
+        )
+        self.btn_preview_1.grid(row=2, column=4, padx=5, pady=5)
+
         self.btn_usa_extra_1 = tk.Button(
             self, text="Cruzar con Refinanciamiento (#1)", bg="#cccccc", fg="white",
             state="disabled",
             command=self.operar_con_extra_1
         )
-        self.btn_usa_extra_1.grid(row=3, column=0, columnspan=5, pady=5)
+        self.btn_usa_extra_1.grid(row=3, column=0, columnspan=8, pady=5)
 
 
         #
@@ -2266,12 +2366,24 @@ class IngresaRenovantesFrame(tk.Frame):
         )
         self.btn_export_2_no_cumple.grid(row=4, column=4, padx=5, pady=5)
 
+        self.btn_run_2 = tk.Button(
+            self, text="Run #2", bg="#cccccc", fg="white", state="disabled",
+            command=self.run_2
+        )
+        self.btn_run_2.grid(row=4, column=5, padx=5, pady=5)
+
+        self.btn_preview_2 = tk.Button(
+            self, text="Preview", bg="#cccccc", fg="white",
+            command=lambda: self._show_df(self.df_csv_2, "Preview #2")
+        )
+        self.btn_preview_2.grid(row=4, column=6, padx=5, pady=5)
+
         self.btn_usa_extra_2 = tk.Button(
             self, text="Cruzar con Refinanciamiento (#2)", bg="#cccccc", fg="white",
             state="disabled",
             command=self.operar_con_extra_2
         )
-        self.btn_usa_extra_2.grid(row=5, column=0, columnspan=5, pady=5)
+        self.btn_usa_extra_2.grid(row=5, column=0, columnspan=8, pady=5)
 
         #
         # Sub-proceso #3
@@ -2304,12 +2416,24 @@ class IngresaRenovantesFrame(tk.Frame):
         )
         self.btn_export_3_no_cumple.grid(row=6, column=4, padx=5, pady=5)
 
+        self.btn_run_3 = tk.Button(
+            self, text="Run #3", bg="#cccccc", fg="white", state="disabled",
+            command=self.run_3
+        )
+        self.btn_run_3.grid(row=6, column=5, padx=5, pady=5)
+
+        self.btn_preview_3 = tk.Button(
+            self, text="Preview", bg="#cccccc", fg="white",
+            command=lambda: self._show_df(self.df_csv_3, "Preview #3")
+        )
+        self.btn_preview_3.grid(row=6, column=6, padx=5, pady=5)
+
         self.btn_usa_extra_3 = tk.Button(
             self, text="Cruzar con Refinanciamiento (#3)", bg="#cccccc", fg="white",
             state="disabled",
             command=self.operar_con_extra_3
         )
-        self.btn_usa_extra_3.grid(row=7, column=0, columnspan=5, pady=5)
+        self.btn_usa_extra_3.grid(row=7, column=0, columnspan=8, pady=5)
 
         #
         # Sub-proceso #4
@@ -2329,12 +2453,24 @@ class IngresaRenovantesFrame(tk.Frame):
         )
         self.btn_export_4.grid(row=8, column=2, padx=5, pady=5)
 
+        self.btn_run_4 = tk.Button(
+            self, text="Run #4", bg="#cccccc", fg="white", state="disabled",
+            command=self.run_4
+        )
+        self.btn_run_4.grid(row=8, column=3, padx=5, pady=5)
+
+        self.btn_preview_4 = tk.Button(
+            self, text="Preview", bg="#cccccc", fg="white",
+            command=lambda: self._show_df(self.df_csv_4, "Preview #4")
+        )
+        self.btn_preview_4.grid(row=8, column=4, padx=5, pady=5)
+
         self.btn_usa_extra_4 = tk.Button(
             self, text="Cruzar con Refinanciamiento (#4)", bg="#cccccc", fg="white",
             state="disabled",
             command=self.operar_con_extra_4
         )
-        self.btn_usa_extra_4.grid(row=9, column=0, columnspan=5, pady=5)
+        self.btn_usa_extra_4.grid(row=9, column=0, columnspan=8, pady=5)
 
         #
         # Sub-proceso #5
@@ -2354,18 +2490,30 @@ class IngresaRenovantesFrame(tk.Frame):
         )
         self.btn_export_5.grid(row=10, column=2, padx=5, pady=5)
 
+        self.btn_run_5 = tk.Button(
+            self, text="Run #5", bg="#cccccc", fg="white", state="disabled",
+            command=self.run_5
+        )
+        self.btn_run_5.grid(row=10, column=3, padx=5, pady=5)
+
+        self.btn_preview_5 = tk.Button(
+            self, text="Preview", bg="#cccccc", fg="white",
+            command=lambda: self._show_df(self.df_csv_5, "Preview #5")
+        )
+        self.btn_preview_5.grid(row=10, column=4, padx=5, pady=5)
+
         self.btn_usa_extra_5 = tk.Button(
             self, text="Cruzar con Refinanciamiento (#5)", bg="#cccccc", fg="white",
             state="disabled",
             command=self.operar_con_extra_5
         )
-        self.btn_usa_extra_5.grid(row=11, column=0, columnspan=5, pady=5)
+        self.btn_usa_extra_5.grid(row=11, column=0, columnspan=8, pady=5)
 
         # (Opcional) Botón para volver a otro frame
         tk.Button(
             self, text="Volver", bg="#aaaaaa", fg="white",
             command=lambda: controller.show_frame("IngresaFrame")
-        ).grid(row=12, column=0, columnspan=5, pady=20)
+        ).grid(row=12, column=0, columnspan=8, pady=20)
 
 
     # ---------------------------------------------------------
@@ -2386,6 +2534,19 @@ class IngresaRenovantesFrame(tk.Frame):
         self.label_file_extra.config(text=f"Archivo EXTRA: {os.path.basename(file_path)}")
 
         self.enable_extra_buttons()
+
+    def apply_filter(self):
+        """Filtra df_licitados por CODIGO_IES si se ingresó un valor."""
+        global df_licitados
+        codigo = self.codigo_ies_var.get().strip()
+        if df_licitados is None:
+            messagebox.showwarning("Sin datos", "df_licitados está vacío.")
+            return
+        if codigo:
+            self.df_licitados_query = df_licitados[df_licitados["CODIGO_IES"].astype(str) == codigo]
+        else:
+            self.df_licitados_query = df_licitados
+        messagebox.showinfo("Filtrado", f"Registros: {len(self.df_licitados_query)}")
 
     # ---------------------------------------------------------
     #   FUNCIÓN QUE HABILITA/DESHABILITA LOS BOTONES EXTRA
@@ -2436,26 +2597,31 @@ class IngresaRenovantesFrame(tk.Frame):
         if "RUT" not in df_csv.columns:
             messagebox.showerror("Error", "El archivo #1 no contiene la columna 'RUT'.")
             return
-
+        self.df_csv_1 = df_csv.copy()
         self.label_file_1.config(text=f"Archivo #1: {os.path.basename(file_path)}")
+        messagebox.showinfo("Archivo cargado", f"{len(df_csv)} filas cargadas")
+        self.btn_run_1.config(state="normal", bg="#107FFD")
+        self.btn_preview_1.config(bg="#107FFD")
 
+    def run_1(self):
         global df_licitados
+        if self.df_csv_1 is None:
+            messagebox.showwarning("Sin archivo", "Primero carga el archivo #1.")
+            return
         if df_licitados is None or df_licitados.empty:
             messagebox.showwarning("Sin datos", "df_licitados está vacío.")
             return
         df_licitados["PORCENTAJE_AVANCE"] = df_licitados['PORCENTAJE_AVANCE'].round(0)
         df_licitados['RUT'] = df_licitados['RUT'].astype(str)
+        df_csv = self.df_csv_1.copy()
         df_csv['RUT'] = df_csv['RUT'].astype(str)
-        # Ajustar columnas según corresponda
         if 'IES' not in df_csv.columns:
-            df_csv['IES'] = None  # Ejemplo, si no existe
-
-        self.df_resultado_1 = pd.merge(df_licitados, df_csv, on='RUT', how='inner')
-        # Filtra a IES=13, por ejemplo
+            df_csv['IES'] = None
+        self.df_resultado_1 = pd.merge(self.df_licitados_query, df_csv, on='RUT', how='inner')
         self.df_resultado_1 = self.df_resultado_1[self.df_resultado_1['IES'] == '013']
         self.btn_export_1.config(bg="#107FFD")
-
         self.enable_extra_buttons()
+        messagebox.showinfo("Procesado", f"Registros: {len(self.df_resultado_1)}")
 
     def export_1(self):
         if self.df_resultado_1 is None:
@@ -2487,42 +2653,40 @@ class IngresaRenovantesFrame(tk.Frame):
         if "RUT" not in df_csv.columns:
             messagebox.showerror("Error", "El archivo #2 no contiene la columna 'RUT'.")
             return
-
+        self.df_csv_2 = df_csv.copy()
         self.label_file_2.config(text=f"Archivo #2: {os.path.basename(file_path)}")
+        messagebox.showinfo("Archivo cargado", f"{len(df_csv)} filas cargadas")
+        self.btn_run_2.config(state="normal", bg="#107FFD")
+        self.btn_preview_2.config(bg="#107FFD")
 
+    def run_2(self):
         global df_licitados
+        if self.df_csv_2 is None:
+            messagebox.showwarning("Sin archivo", "Primero carga el archivo #2.")
+            return
         if df_licitados is None or df_licitados.empty:
             messagebox.showwarning("Sin datos", "df_licitados está vacío.")
             return
 
         df_licitados['RUT'] = df_licitados['RUT'].astype(str)
+        df_csv = self.df_csv_2.copy()
         df_csv['RUT'] = df_csv['RUT'].astype(str)
         df_licitados["PORCENTAJE_AVANCE"] = df_licitados['PORCENTAJE_AVANCE'].round(0)
-        # Merge
-        df_cruce_2 = pd.merge(df_licitados, df_csv, on='RUT', how='inner')
+        df_cruce_2 = pd.merge(self.df_licitados_query, df_csv, on='RUT', how='inner')
 
-        # =============================
-        # EJEMPLO de condición para separar 'cumple' vs. 'no cumple'
-        # Ajusta la lógica a tus necesidades reales
-        # =============================
-        # Supongamos que en df_csv hay una columna "ESTADO_ACTUAL"
-        # y consideramos "cumple" si ESTADO_ACTUAL == "APROBADO"
         estados_validos_5B = [4, 8, 12, 13, 18, 19, 21, 23, 24, 35]
         cond_cumple_2 = df_cruce_2['ESTADO_ACTUAL'].isin(estados_validos_5B)
 
         self.df_resultado_cruce_2 = df_cruce_2[cond_cumple_2].copy()
         self.df_resultado_no_cruce_2 = df_cruce_2[~cond_cumple_2].copy()
-        self.df_resultado_2 = df_cruce_2  # Este mantiene todos
+        self.df_resultado_2 = df_cruce_2
 
-        # Activa botón de exportar
         self.btn_export_2.config(bg="#107FFD")
-
-        # También podrías cambiar a azul (bg="#107FFD") los botones de cumple/no cumple
-        # para indicar que hay datos
         self.btn_export_2_cumple.config(bg="#107FFD")
         self.btn_export_2_no_cumple.config(bg="#107FFD")
 
         self.enable_extra_buttons()
+        messagebox.showinfo("Procesado", f"CUMPLE: {len(self.df_resultado_cruce_2)} | NO: {len(self.df_resultado_no_cruce_2)}")
 
     def export_2(self):
         if self.df_resultado_2 is None:
@@ -2568,27 +2732,28 @@ class IngresaRenovantesFrame(tk.Frame):
         if "RUT" not in df_csv.columns:
             messagebox.showerror("Error", "El archivo #3 no contiene la columna 'RUT'.")
             return
-
+        self.df_csv_3 = df_csv.copy()
         self.label_file_3.config(text=f"Archivo #3: {os.path.basename(file_path)}")
+        messagebox.showinfo("Archivo cargado", f"{len(df_csv)} filas cargadas")
+        self.btn_run_3.config(state="normal", bg="#107FFD")
+        self.btn_preview_3.config(bg="#107FFD")
 
+    def run_3(self):
         global df_licitados
+        if self.df_csv_3 is None:
+            messagebox.showwarning("Sin archivo", "Primero carga el archivo #3.")
+            return
         if df_licitados is None or df_licitados.empty:
             messagebox.showwarning("Sin datos", "df_licitados está vacío.")
             return
         df_licitados["PORCENTAJE_AVANCE"] = df_licitados['PORCENTAJE_AVANCE'].round(0)
         df_licitados['RUT'] = df_licitados['RUT'].astype(str)
+        df_csv = self.df_csv_3.copy()
         df_csv['RUT'] = df_csv['RUT'].astype(str)
         df_csv = df_csv[['RUT','IESN_COD','ESTADO_RENOVANTE','CONTADOR_CAMBIOS']]
-        df_cruce_3 = pd.merge(df_licitados, df_csv, on='RUT', how='inner')
-
-        # =============================
-        # EJEMPLO de condición para separar 'cumple' vs. 'no cumple'
-        # =============================
-        # Supongamos que la columna "ULTIMO_NIVEL" indica si cumple
-
+        df_cruce_3 = pd.merge(self.df_licitados_query, df_csv, on='RUT', how='inner')
 
         mask_iesn_13 = (df_cruce_3['IESN_COD'] == 13)
-
         mask_iesn_no_13 = (df_cruce_3['IESN_COD'] != 13)
         mask_estado_ok = ~df_cruce_3['ESTADO_RENOVANTE'].isin([7, 10, 11, 14, 15])
         mask_contador_ok = (df_cruce_3['CONTADOR_CAMBIOS'] == 0)
@@ -2609,6 +2774,7 @@ class IngresaRenovantesFrame(tk.Frame):
         self.btn_export_3_no_cumple.config(bg="#107FFD")
 
         self.enable_extra_buttons()
+        messagebox.showinfo("Procesado", f"CUMPLE: {len(df_cumple_renovante_anterior)} | NO: {len(df_no_cumple_renovante_anterior)}")
 
     def export_3(self):
         if self.df_resultado_3 is None:
@@ -2653,21 +2819,30 @@ class IngresaRenovantesFrame(tk.Frame):
         if "RUT" not in df_csv.columns:
             messagebox.showerror("Error", "El archivo #4 no contiene la columna 'RUT'.")
             return
-
+        self.df_csv_4 = df_csv.copy()
         self.label_file_4.config(text=f"Archivo #4: {os.path.basename(file_path)}")
+        messagebox.showinfo("Archivo cargado", f"{len(df_csv)} filas cargadas")
+        self.btn_run_4.config(state="normal", bg="#107FFD")
+        self.btn_preview_4.config(bg="#107FFD")
 
+    def run_4(self):
         global df_licitados
+        if self.df_csv_4 is None:
+            messagebox.showwarning("Sin archivo", "Primero carga el archivo #4.")
+            return
         if df_licitados is None or df_licitados.empty:
             messagebox.showwarning("Sin datos", "df_licitados está vacío.")
             return
         df_licitados["PORCENTAJE_AVANCE"] = df_licitados['PORCENTAJE_AVANCE'].round(0)
         df_licitados['RUT'] = df_licitados['RUT'].astype(str)
+        df_csv = self.df_csv_4.copy()
         df_csv['RUT'] = df_csv['RUT'].astype(str)
 
-        self.df_resultado_4 = pd.merge(df_licitados, df_csv, on='RUT', how='inner')
+        self.df_resultado_4 = pd.merge(self.df_licitados_query, df_csv, on='RUT', how='inner')
         self.btn_export_4.config(bg="#107FFD")
 
         self.enable_extra_buttons()
+        messagebox.showinfo("Procesado", f"Registros: {len(self.df_resultado_4)}")
 
     def export_4(self):
         if self.df_resultado_4 is None:
@@ -2697,21 +2872,30 @@ class IngresaRenovantesFrame(tk.Frame):
         if "RUT" not in df_csv.columns:
             messagebox.showerror("Error", "El archivo #5 no contiene la columna 'RUT'.")
             return
-
+        self.df_csv_5 = df_csv.copy()
         self.label_file_5.config(text=f"Archivo #5: {os.path.basename(file_path)}")
+        messagebox.showinfo("Archivo cargado", f"{len(df_csv)} filas cargadas")
+        self.btn_run_5.config(state="normal", bg="#107FFD")
+        self.btn_preview_5.config(bg="#107FFD")
 
+    def run_5(self):
         global df_licitados
+        if self.df_csv_5 is None:
+            messagebox.showwarning("Sin archivo", "Primero carga el archivo #5.")
+            return
         if df_licitados is None or df_licitados.empty:
             messagebox.showwarning("Sin datos", "df_licitados está vacío.")
             return
         df_licitados["PORCENTAJE_AVANCE"] = df_licitados['PORCENTAJE_AVANCE'].round(0)
         df_licitados['RUT'] = df_licitados['RUT'].astype(str)
+        df_csv = self.df_csv_5.copy()
         df_csv['RUT'] = df_csv['RUT'].astype(str)
 
-        self.df_resultado_5 = pd.merge(df_licitados, df_csv, on='RUT', how='inner')
+        self.df_resultado_5 = pd.merge(self.df_licitados_query, df_csv, on='RUT', how='inner')
         self.btn_export_5.config(bg="#107FFD")
 
         self.enable_extra_buttons()
+        messagebox.showinfo("Procesado", f"Registros: {len(self.df_resultado_5)}")
 
     def export_5(self):
         if self.df_resultado_5 is None:
