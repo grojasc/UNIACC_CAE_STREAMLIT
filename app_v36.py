@@ -13,7 +13,7 @@ import chardet
 from pathlib import Path
 from typing import Final, List
 import datetime as _dt        # ya al inicio del script
-
+import logging
 
 
 ###############################################################################
@@ -52,10 +52,157 @@ username = 'usr_dwhppto'
 password = 'g8)yT1m23u7H'
 connection1 = create_sql_server_connection(server, 'DWH_DAI', username, password)
 connection2 = create_sql_server_connection(server, 'UConectores', username, password)
+# ───────────────── LOGGING ─────────────────
+# ─────────── LOGGING ───────────
+#logging.basicConfig(
+#    level=logging.INFO,
+#    format="%(asctime)s [%(levelname)s] %(message)s",
+#    handlers=[
+#        logging.FileHandler("solicitud_monto.log", mode="a", encoding="utf-8"),
+#        logging.StreamHandler()
+#    ]
+#)
+#log = logging.getLogger(__name__)
+
+#============================================================================
+#Utilities
+#============================================================================
+
+def _clean_rut(series: pd.Series) -> pd.Series:
+    return (series.astype(str)
+                  .str.strip()
+                  .str.replace(r'\D', '', regex=True)
+                  .str.zfill(8))
+# --------------------------------------------------
+#  Utilidades de normalización
+# --------------------------------------------------
+def clean_text(text):
+    if isinstance(text, str):
+        text = unicodedata.normalize('NFKD', text).encode('ASCII','ignore').decode('utf-8')
+        text = text.upper()
+        text = re.sub(r'[^A-ZÜ\s-]', '', text)
+    return text
 
 
+"""SeguimientosFrame – agrega columna VALIDACION_REGLAS
+-----------------------------------------------------------------------------
+• No modifica el valor original de `df_licitados`.
+• Genera una columna `VALIDACION_REGLAS` con las reglas MINEDUC incumplidas
+  (separadas por `; `). Si no hay faltas, queda vacía.
+• Mantiene formato previo; sólo se emplea para validación.
+"""
+# --------------------------------------------------
+#  Config MINEDUC & reglas simples (longitud, numérico)
+# --------------------------------------------------
+SPEC = {
+    "RUT":            dict(len_=8,  numeric=True),
+    "DV":             dict(len_=1,  numeric=False),
+    "APELLIDO PATERNO":dict(max_=200),
+    "APELLIDO MATERNO":dict(max_=200),
+    "NOMBRES":        dict(max_=201),
+    "CELULAR":        dict(len_=9,  numeric=True),
+    "EMAIL":          dict(max_=200),
+    "CODIGO CARRERA": dict(len_=4,  numeric=True),
+    "JORNADA":        dict(len_=1,  numeric=True),
+    "AÑO INGRESO CARRERA":dict(len_=4, numeric=True),
+    "ARANCEL SOLICITADO":dict(len_=10, numeric=True),
+    "ARANCEL REAL":   dict(len_=10, numeric=True),
+    "CODIGO UNICO MINEDUC":dict(len_=24, numeric=False),
+}
+MINUD_COLS = list(SPEC.keys()) + ["ETAPA FIRMA"]
+ALIASES = {
+    #"ANO_INGRESO_CARRERA": "AÑO INGRESO CARRERA",
+    "AÑO_INGRESO_CARRERA": "AÑO INGRESO CARRERA",
+    # nombres con guion bajo desde la vista SQL
+    "APELLIDO_PATERNO": "APELLIDO PATERNO",
+    "APELLIDO_MATERNO": "APELLIDO MATERNO",
+    "CODIGO_CARRERA": "CODIGO CARRERA",
+    "ARANCEL_SOLICITADO": "ARANCEL SOLICITADO",
+    "ARANCEL_REAL": "ARANCEL REAL",
+    "CODIGO_UNICO_MINEDUC": "CODIGO UNICO MINEDUC",
+    "CODIGO_UNICO_MINEDUC ": "CODIGO UNICO MINEDUC",  # por si trae espacio extra
+}
+
+# --------------------------------------------------
+#  Utils
+# --------------------------------------------------
+
+def _upper_ascii(text):
+    if pd.isna(text):
+        return pd.NA
+    txt = str(text)
+    txt = unicodedata.normalize("NFKD", txt).encode("ASCII", "ignore").decode()
+    return re.sub(r"\s{2,}", " ", txt.upper().strip())
 
 
+def _ensure(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.rename(columns={k: v for k, v in ALIASES.items() if k in df.columns})
+    for col in MINUD_COLS:
+        if col not in df.columns:
+            df[col] = pd.NA
+    return df
+
+
+# --------------------------------------------------
+#  Validación sin modificar valores
+# --------------------------------------------------
+
+def _is_na_scalar(v):
+    """True si v es escalar NaN/NA, False en otro caso."""
+    return (v is pd.NA) or (pd.isna(v) if not isinstance(v, (list, tuple, dict, pd.Series)) else False)
+
+
+def validate_minud(df: pd.DataFrame) -> pd.DataFrame:
+    """Valida reglas + formatea RUT/CELULAR/etc. al final."""
+    df = _ensure(df.copy())
+    issues_all = []
+    for i, row in df.iterrows():
+        issues = []
+        for col, rule in SPEC.items():
+            val = row[col]
+            if _is_na_scalar(val):
+                issues.append(f"{col}:VACIO")
+                continue
+            txt = str(val)
+            if rule.get("numeric") and not txt.isdigit():
+                issues.append(f"{col}:NO_NUM")
+            if "len_" in rule and len(txt) != rule["len_"]:
+                issues.append(f"{col}:LEN{len(txt)}")
+            if "max_" in rule and len(txt) > rule.get("max_", len(txt)):
+                issues.append(f"{col}:>{rule['max_']}")
+        issues_all.append("; ".join(issues))
+
+    df["VALIDACION_REGLAS"] = issues_all
+
+    # Normaliza textos relevantes
+    for col in ("APELLIDO PATERNO", "APELLIDO MATERNO", "NOMBRES", "EMAIL", "ETAPA FIRMA"):
+        df[col] = df[col].apply(_upper_ascii)
+
+    # ➜ Ahora SÍ se realiza padding para los campos numéricos final
+    #for col, rule in SPEC.items():
+    #    if rule.get("numeric") and "len_" in rule:
+    #        df[col] = df[col].apply(lambda x: _pad_num(x, rule["len_"]))
+
+    ordered_cols = MINUD_COLS + ["VALIDACION_REGLAS"]
+    return df[ordered_cols][ordered_cols]
+
+# --------------------------------------------------
+#  Merge & clean (igual que antes, pero usa validate_minud)
+# --------------------------------------------------
+
+def merge_and_clean(df_base: pd.DataFrame, df_csv: pd.DataFrame):
+    df_csv = df_csv[["RUT"]].copy()
+    df_base = _ensure(df_base.copy())
+    df_base["RUT"] = df_base["RUT"].astype(str)
+    df_csv["RUT"] = df_csv["RUT"].astype(str)
+    
+    df_ok = pd.merge(df_base, df_csv, on="RUT", how="inner").drop_duplicates("RUT")
+    df_nc = df_csv[~df_csv["RUT"].isin(df_ok["RUT"])]
+    
+    df_ok = validate_minud(df_ok)
+    df_ok["RUT"] = df_ok["RUT"].str.zfill(8)
+    
+    return df_ok, df_nc.rename(columns={"RUT": "RUT SIN CRUCE"})
 #########-----------------QUERY LICITADOS AL INICIO-------------------##################
 query = """
         SELECT
@@ -104,8 +251,10 @@ query = """
     RIGHT(REPLICATE('0', 1) + CAST(NIVEL_DE_ESTUDIOS    AS varchar(50)), 1) AS NIVEL_DE_ESTUDIOS,
 
     -- 23-24  Aranceles (10)
-    RIGHT(REPLICATE('0',10) + CAST(ARANCEL_SOLICITADO AS varchar(50)),10)  AS ARANCEL_SOLICITADO,
-    RIGHT(REPLICATE('0',10) + CAST(ARANCEL_REAL       AS varchar(50)),10)  AS ARANCEL_REAL,
+    -- 23-24  Aranceles formateados como texto fijo de 10 dígitos
+    CONVERT(bigint, ARANCEL_SOLICITADO)  AS ARANCEL_SOLICITADO,
+    CONVERT(bigint, ARANCEL_REAL)       AS ARANCEL_REAL,
+
 
     -- 25  Comprobante matrícula
     UPPER(COMPROBANTE_MATRICULA)                                         AS COMPROBANTE_MATRICULA,
@@ -222,13 +371,6 @@ def read_any_file(title="Seleccionar archivo"):
         return None, None
 
 
-
-def clean_text(text):
-    if isinstance(text, str):
-        text = unicodedata.normalize('NFKD', text).encode('ASCII','ignore').decode('utf-8')
-        text = text.upper()
-        text = re.sub(r'[^A-ZÜ\s-]', '', text)
-    return text
 
 
 
@@ -927,6 +1069,300 @@ class FUASFrame(tk.Frame):
                 messagebox.showinfo("Exportado", f"Archivo Excel guardado: {file_path}")
             except Exception as e:
                 messagebox.showerror("Error", f"No se pudo exportar.\n{e}")
+
+# ============================================================== 
+#       CLASE SOLICITUD DE MONTO (ADAPTADA) 
+# ============================================================== 
+
+
+class SolicitudMontoFrame(tk.Frame):
+    """
+    Flujo:
+      1) Cargar Excel de refinanciamiento (df_extra).
+      2) Cargar archivos 5A y 5B.
+      3) "Cruce Matrícula" -> (5A ∩ 5B) se cruza con df_licitados => self.df_result
+      4) Se habilita "Cruce Refinanciamiento" (para 5A+5B) -> self.df_result se cruza con df_extra.
+      5) Cargar RUT (5C) -> cruces análogos en otra fila.
+    """
+    def __init__(self, parent, controller):
+        super().__init__(parent)
+        self.controller = controller
+        self.config(bg="#FFFFFF")
+
+        global df_licitados
+
+        # DataFrames sesión
+        self.df_extra = None
+        self.df_csv_1 = None        # 5A
+        self.df_csv_2 = None        # 5B
+        self.df_csv_rut = None      # 5C
+        self.df_result = None
+        self.df_nc_mat = None
+        self.df_nc_ref = None
+        self.df_result_rut = None
+        self.df_nc_mat_rut = None
+        self.df_nc_ref_rut = None
+        self.df_dup = df_licitados[df_licitados.duplicated("RUT", keep=False)].copy()
+
+        # ---------------- UI ----------------
+        for r in range(14): self.rowconfigure(r, weight=1)
+        for c in range(6): self.columnconfigure(c, weight=1)
+
+        tk.Label(self, text="SOLICITUD DE MONTO", font=("Arial",16,"bold"), bg="#FFFFFF")\
+            .grid(row=0,column=0,columnspan=6,pady=10)
+        tk.Button(self,text="Exportar duplicados",bg="#FF8C00",fg="white",command=self.export_dup)\
+            .grid(row=0,column=5,sticky="e",padx=5)
+
+        # Cargar Refinanciamiento
+        self.btn_ref = tk.Button(self,text="Cargar Refinanciamiento",bg="#008000",fg="white",command=self.load_ref)
+        self.btn_ref.grid(row=1,column=0,padx=5)
+        self.lbl_ref = tk.Label(self,text="Sin archivo ref",bg="#FFFFFF")
+        self.lbl_ref.grid(row=1,column=1,columnspan=5,sticky="w")
+
+        # 5A y 5B
+        self.btn1a = tk.Button(self,text="Cargar 5A",bg="#107FFD",fg="white",command=self.load_1a)
+        self.btn1a.grid(row=2,column=0,padx=5)
+        self.lbl1a = tk.Label(self,text="Sin 5A",bg="#FFFFFF")
+        self.lbl1a.grid(row=2,column=1,sticky="w")
+        self.btn1b = tk.Button(self,text="Cargar Reporte Sol Monto",bg="#107FFD",fg="white",command=self.load_1b)
+        self.btn1b.grid(row=3,column=0,padx=5)
+        self.lbl1b = tk.Label(self,text="Sin Reporte Sol Monto",bg="#FFFFFF")
+        self.lbl1b.grid(row=3,column=1,sticky="w")
+
+        # Botones cruce 5A+5B
+        self.btn_mat = tk.Button(self,text="Cruce Matrícula",bg="#cccccc",fg="white",command=self.run_mat)
+        self.btn_mat.grid(row=4,column=0,pady=5)
+        self.btn_view_mat = tk.Button(self,text="Ver",bg="#cccccc",state="disabled",
+                                      command=lambda: self._show_df(self.df_result,"Cruce Matrícula 5A+Reporte Sol Monto"))
+        self.btn_view_mat.grid(row=4,column=1)
+        self.btn_nc_mat = tk.Button(self,text="SIN cruce Matrícula",bg="#cccccc",fg="white",
+                                    state="disabled",command=lambda: self.save_nc(self.df_nc_mat,"NoCruce_Mat"))
+        self.btn_nc_mat.grid(row=4,column=2)
+        self.btn_ref_run = tk.Button(self,text="Cruce Refinanciamiento",bg="#cccccc",fg="white",
+                                     state="disabled",command=self.run_ref)
+        self.btn_ref_run.grid(row=4,column=3)
+        self.btn_view_ref = tk.Button(self,text="Ver",bg="#cccccc",state="disabled",
+                                      command=lambda: self._show_df(self.df_ref_result,"Cruce Refinanciamiento 5A+Reporte Sol Monto"))
+        self.btn_view_ref.grid(row=4,column=4)
+        self.btn_nc_ref = tk.Button(self,text="SIN cruce Ref.",bg="#cccccc",fg="white",
+                                    state="disabled",command=lambda: self.save_nc(self.df_nc_ref,"NoCruce_Ref"))
+        self.btn_nc_ref.grid(row=4,column=5)
+
+        self.lbl_status_mat = tk.Label(self,text="",bg="#FFFFFF",anchor="w")
+        self.lbl_status_mat.grid(row=5,column=0,columnspan=6,sticky="we")
+
+        # 5C (RUT)
+        self.btn_rut = tk.Button(self,text="Cargar RUT (5C)",bg="#107FFD",fg="white",command=self.load_rut)
+        self.btn_rut.grid(row=6,column=0,padx=5)
+        self.lbl_rut = tk.Label(self,text="Sin 5C",bg="#FFFFFF")
+        self.lbl_rut.grid(row=6,column=1,sticky="w")
+
+        self.btn_mat_rut = tk.Button(self,text="Cruce Matrícula (RUT)",bg="#cccccc",fg="white",command=self.run_mat_rut)
+        self.btn_mat_rut.grid(row=7,column=0)
+        self.btn_view_mat_rut = tk.Button(self,text="Ver",state="disabled",bg="#cccccc",
+                                          command=lambda:self._show_df(self.df_result_rut,"Cruce Matrícula RUT"))
+        self.btn_view_mat_rut.grid(row=7,column=1)
+        self.btn_nc_mat_rut = tk.Button(self,text="SIN cruce Matrícula (RUT)",bg="#cccccc",fg="white",
+                                        state="disabled",command=lambda:self.save_nc(self.df_nc_mat_rut,"NoCruce_Mat_RUT"))
+        self.btn_nc_mat_rut.grid(row=7,column=2)
+        self.btn_ref_rut = tk.Button(self,text="Cruce Ref. (RUT)",bg="#cccccc",fg="white",
+                                     state="disabled",command=self.run_ref_rut)
+        self.btn_ref_rut.grid(row=7,column=3)
+        self.btn_view_ref_rut = tk.Button(self,text="Ver",state="disabled",bg="#cccccc",
+                                          command=lambda:self._show_df(self.df_ref_result_rut,"Cruce Refinanciamiento RUT"))
+        self.btn_view_ref_rut.grid(row=7,column=4)
+        self.btn_nc_ref_rut = tk.Button(self,text="SIN cruce Ref. (RUT)",bg="#cccccc",fg="white",
+                                        state="disabled",command=lambda:self.save_nc(self.df_nc_ref_rut,"NoCruce_Ref_RUT"))
+        self.btn_nc_ref_rut.grid(row=7,column=5)
+
+        self.lbl_status_rut = tk.Label(self,text="",bg="#FFFFFF",anchor="w")
+        self.lbl_status_rut.grid(row=8,column=0,columnspan=6,sticky="we")
+
+        tk.Button(self,text="Volver",bg="#aaaaaa",fg="white",
+                  command=lambda: controller.show_frame("IngresaFrame")).grid(row=13,column=0,columnspan=6,pady=15)
+
+        # Para almacenar temporalmente resultados de refinanciamiento (vista previa)
+        self.df_ref_result = None
+        self.df_ref_result_rut = None
+
+    # ---------------- Export duplicados ----------------
+    def export_dup(self):
+        if self.df_dup.empty:
+            messagebox.showinfo("Duplicados","No hay RUT duplicados."); return
+        self._save_df(self.df_dup,"Duplicados_RUT")
+
+    # ---------------- Loaders ----------------
+    def load_ref(self):
+        df,p=read_any_file("Excel Refinanciamiento")
+        if df is None: return
+        col="RUTALU" if "RUTALU" in df.columns else "RUT"
+        if col not in df.columns:
+            messagebox.showerror("Error","Sin RUT en refinanciamiento"); return
+        df["RUT"]=df[col].astype(str).str.strip()
+        self.df_extra=df
+        self.lbl_ref.config(text=os.path.basename(p))
+
+    def load_1a(self):
+        df,p=read_any_file("Archivo 5A")
+        if df is None or "RUT" not in df.columns:
+            messagebox.showerror("Error","5A sin RUT"); return
+        df["RUT"]=df["RUT"].astype(str).str.strip()
+        self.df_csv_1=df
+        self.lbl1a.config(text=os.path.basename(p))
+
+    def load_1b(self):
+        df,p=read_any_file("Archivo 5B")
+        if df is None or "RUT" not in df.columns:
+            messagebox.showerror("Error","5B sin RUT"); return
+        df["RUT"]=df["RUT"].astype(str).str.strip()
+        self.df_csv_2=df
+        self.lbl1b.config(text=os.path.basename(p))
+
+    def load_rut(self):
+        df,p=read_any_file("Archivo 5C")
+        if df is None or "RUT" not in df.columns:
+            messagebox.showerror("Error","5C sin RUT"); return
+        df["RUT"]=df["RUT"].astype(str).str.strip()
+        self.df_csv_rut=df
+        self.lbl_rut.config(text=os.path.basename(p))
+
+    # ---------------- Cruces ----------------
+    def run_mat(self):
+        if self.df_csv_1 is None or self.df_csv_2 is None:
+            messagebox.showwarning("Faltan archivos","Carga 5A y 5B primero."); return
+        global df_licitados
+        left = self.df_csv_1[["RUT"]].drop_duplicates()
+        right = self.df_csv_2[["RUT"]].drop_duplicates()
+        df_concat = pd.merge(left,right,on="RUT",how="inner")  # intersección 5A ∩ 5B
+
+        self.df_result,self.df_nc_mat = merge_and_clean(df_licitados,df_concat)
+        self.df_result = self._drop_firma(self.df_result)
+
+        if self.df_result.empty:
+            messagebox.showinfo("Cruce Matrícula","No hubo coincidencias.")
+        else:
+            # Vista previa y export automático opcional
+            self._save_df(self.df_result,"Cruce_Mat_5A5B")
+
+        # Actualiza UI
+        self.btn_mat.config(bg="#107FFD")
+        self.btn_nc_mat.config(state="normal",bg="#107FFD")
+        self.btn_ref_run.config(state="normal",bg="#107FFD")
+        self.btn_view_mat.config(state="normal",bg="#107FFD")
+        self.lbl_status_mat.config(
+            text=f"Cruce Matrícula 5A+5B: {len(self.df_result)} coincidencias / {len(self.df_nc_mat)} sin cruce."
+        )
+
+    def run_ref(self):
+        if self.df_result is None or self.df_extra is None:
+            messagebox.showwarning("Faltan datos","Primero realiza el cruce de Matrícula y carga Refinanciamiento."); return
+        current = self.df_extra[["RUT","SALDO"]].copy()
+        current["RUT"]=current["RUT"].astype(str)
+        current = current.rename(columns={'SALDO': 'MONTO REFINANCIAMIENTO'})
+        current['REFINANCIAMIENTO'] = '1'
+        self.df_ref_result = pd.merge(self.df_result,current,on="RUT",how="inner")
+        self.df_nc_ref = self.df_result[~self.df_result["RUT"].isin(self.df_ref_result["RUT"])]
+
+        if self.df_ref_result.empty:
+            messagebox.showinfo("Cruce Refinanciamiento","Sin coincidencias.")
+        else:
+            self._save_df(self.df_ref_result,"Cruce_Ref_5A5B")
+
+        self.btn_nc_ref.config(state="normal",bg="#107FFD")
+        self.btn_view_ref.config(state="normal",bg="#107FFD")
+        self.lbl_status_mat.config(
+            text=self.lbl_status_mat.cget("text") + 
+                 f" | Refinanciamiento: {len(self.df_ref_result)} coincidencias / {len(self.df_nc_ref)} sin cruce."
+        )
+
+    def run_mat_rut(self):
+        if self.df_csv_rut is None:
+            messagebox.showwarning("Falta archivo","Carga 5C primero."); return
+        global df_licitados
+        self.df_result_rut,self.df_nc_mat_rut = merge_and_clean(df_licitados,self.df_csv_rut)
+        self.df_result_rut = self._drop_firma(self.df_result_rut)
+
+        if self.df_result_rut.empty:
+            messagebox.showinfo("Cruce Matrícula (RUT)","No hubo coincidencias.")
+        else:
+            self._save_df(self.df_result_rut,"Cruce_Mat_RUT")
+
+        self.btn_mat_rut.config(bg="#107FFD")
+        self.btn_nc_mat_rut.config(state="normal",bg="#107FFD")
+        self.btn_ref_rut.config(state="normal",bg="#107FFD")
+        self.btn_view_mat_rut.config(state="normal",bg="#107FFD")
+        self.lbl_status_rut.config(
+            text=f"Cruce Matrícula (RUT): {len(self.df_result_rut)} coincidencias / {len(self.df_nc_mat_rut)} sin cruce."
+        )
+
+    def run_ref_rut(self):
+        if self.df_result_rut is None or self.df_extra is None:
+            messagebox.showwarning("Faltan datos","Primero realiza el cruce Matrícula (RUT) y carga Refinanciamiento."); return
+        current = self.df_extra[["RUT","SALDO"]].copy()
+        current["RUT"]=current["RUT"].astype(str)
+        current = current.rename(columns={'SALDO': 'MONTO REFINANCIAMIENTO'})
+        current['REFINANCIAMIENTO'] = '1'
+        self.df_ref_result_rut = pd.merge(self.df_result_rut,current,on="RUT",how="inner")
+        self.df_nc_ref_rut = self.df_result_rut[~self.df_result_rut["RUT"].isin(self.df_ref_result_rut["RUT"])]
+
+        if self.df_ref_result_rut.empty:
+            messagebox.showinfo("Cruce Refinanciamiento (RUT)","Sin coincidencias.")
+        else:
+            self._save_df(self.df_ref_result_rut,"Cruce_Ref_RUT")
+
+        self.btn_nc_ref_rut.config(state="normal",bg="#107FFD")
+        self.btn_view_ref_rut.config(state="normal",bg="#107FFD")
+        self.lbl_status_rut.config(
+            text=self.lbl_status_rut.cget("text") + 
+                 f" | Refinanciamiento: {len(self.df_ref_result_rut)} coincidencias / {len(self.df_nc_ref_rut)} sin cruce."
+        )
+
+    # ---------------- Utilidades ----------------
+    def _drop_firma(self, df):
+        if df is not None and not df.empty and 'ETAPA FIRMA' in df.columns:
+            return df.drop(columns=['ETAPA FIRMA'])
+        return df
+
+    def _show_df(self, df, title):
+        if df is None or df.empty:
+            messagebox.showinfo("Sin datos","No hay datos para mostrar."); return
+        win = tk.Toplevel(self)
+        win.title(title)
+        frame = ttk.Frame(win); frame.pack(fill="both", expand=True)
+        cols = list(df.columns)
+        tree = ttk.Treeview(frame, columns=cols, show="headings")
+        for c in cols:
+            tree.heading(c, text=c)
+            tree.column(c, width=120, anchor="w")
+        vsb = ttk.Scrollbar(frame, orient="vertical", command=tree.yview)
+        tree.configure(yscrollcommand=vsb.set)
+        tree.pack(side="left", fill="both", expand=True)
+        vsb.pack(side="right", fill="y")
+        for _,row in df.iterrows():
+            tree.insert("", "end", values=[row[c] for c in cols])
+
+    def save_nc(self, df, name):
+        if df is None or df.empty:
+            messagebox.showinfo("Sin datos", "No hay registros sin cruce para exportar."); return
+        self._save_df(df,name)
+
+    def _save_df(self, df, default_name):
+        path=filedialog.asksaveasfilename(
+            title="Guardar Excel",
+            defaultextension=".xlsx",
+            filetypes=[("Excel","*.xlsx")],
+            initialfile=f"{default_name}.xlsx"
+        )
+        if not path: return
+        try:
+            df.to_excel(path, index=False)
+            messagebox.showinfo("Exportado", f"Guardado en:\n{path}")
+        except Exception as e:
+            messagebox.showerror("Error", str(e))
+
+
+
+
 
 class LicitadosFrame(tk.Frame):
     """
@@ -2332,317 +2768,136 @@ class SeguimientosFrame(tk.Frame):
         
         global df_licitados
         self.df_licitados_query = df_licitados
-        
+        self.df_duplicados = df_licitados[df_licitados.duplicated(subset=["RUT"], keep=False)].copy()
         df_licitados["PORCENTAJE_AVANCE"] = df_licitados['PORCENTAJE_AVANCE'].round(0)
         
-        # Sub-procesos #1, #2, #3, #4
-        self.df_resultado_1 = None
-        self.df_resultado_2 = None
-        self.df_resultado_3 = None
-        self.df_resultado_4 = None
+        # CSV temporales por sub‑proceso
+        self.df_csv_1 = self.df_csv_2 = self.df_csv_3 = self.df_csv_4 = self.df_csv_rut = None
+        # Resultados tras "Run"
+        self.df_resultado_1 = self.df_resultado_2 = self.df_resultado_3 = self.df_resultado_4 = self.df_resultado_rut = None
 
-        # NUEVO: Para el sub-proceso "RUT"
-        self.df_csv_rut = None
-        self.df_resultado_rut = None
+        # -----------------------------------------------------------------
+        #  Layout base 3×12
+        cols = [1, 2, 3, 4, 5]  # (load, etiqueta, export OK, run, export NO)
+        self.rowconfigure(list(range(12)), weight=1)
+        for c in range(6):  # 0‑5
+            self.columnconfigure(c, weight=1)
 
-        #
-        # Layout base
-        #
-        for row_idx in range(12):
-            self.rowconfigure(row_idx, weight=1)
-        for col_idx in range(3):
-            self.columnconfigure(col_idx, weight=1)
+        # --- atributos dinámicos ---------------------------------------------------
+        for idx in (1, 2, 3, 4, 5):
+            setattr(self, f"df_csv_{idx}", None)
+            setattr(self, f"df_ok_{idx}", None)
+            setattr(self, f"df_nc_{idx}", None)
 
-        tk.Label(
-            self, text="Sub-proceso: Licitados", font=("Arial", 16, "bold"),
-            bg="#FFFFFF"
-        ).grid(row=0, column=0, columnspan=3, pady=10)
+        # --- cabecera --------------------------------------------------------------
+        tk.Label(self, text="Sub‑proceso: Seguimiento Firmas", font=("Arial", 16, "bold"), bg="#FFFFFF").grid(row=0, column=0, columnspan=6, pady=10)
+        tk.Button(self, text="Exportar duplicados", bg="#FF8C00", fg="white", command=self.exportar_duplicados).grid(row=0, column=5, padx=5, pady=5, sticky="e")
 
-        #
-        # SUB-PROCESO #1 (Firma en Banco)
-        #
-        self.btn_cargar_1 = tk.Button(
-            self, text="Firma en Banco (#1)", bg="#107FFD", fg="white",
-            command=self.load_file_licitados_1
-        )
-        self.btn_cargar_1.grid(row=1, column=0, padx=5, pady=5)
+        # --- helper para filas -----------------------------------------------------
+        def _fila(idx, texto):
+            row = idx
+            # 0 Cargar
+            tk.Button(self, text=texto, bg="#107FFD", fg="white", command=lambda i=idx: self.load_file(i)).grid(row=row, column=0, padx=5, pady=5)
+            # 1 etiqueta
+            setattr(self, f"lbl_{idx}", tk.Label(self, text=f"Sin archivo (#{idx})", bg="#FFFFFF"))
+            getattr(self, f"lbl_{idx}").grid(row=row, column=1, sticky="w")
+            # 2 export OK
+            setattr(self, f"btn_exp_ok_{idx}", tk.Button(self, text=f"Export OK #{idx}", bg="#cccccc", fg="white", command=lambda i=idx: self.exportar(i, ok=True)))
+            getattr(self, f"btn_exp_ok_{idx}").grid(row=row, column=2, padx=5, pady=5)
+            # 3 run
+            setattr(self, f"btn_run_{idx}", tk.Button(self, text=f"Run #{idx}", bg="#cccccc", fg="white", command=lambda i=idx: self.run_merge(i)))
+            getattr(self, f"btn_run_{idx}").grid(row=row, column=3, padx=5, pady=5)
+            # 4 export NO
+            setattr(self, f"btn_exp_nc_{idx}", tk.Button(self, text=f"Sin Cruce #{idx}", bg="#cccccc", fg="white", command=lambda i=idx: self.exportar(i, ok=False)))
+            getattr(self, f"btn_exp_nc_{idx}").grid(row=row, column=4, padx=5, pady=5)
 
-        self.label_file_1 = tk.Label(self, text="Sin archivo (#1)", bg="#FFFFFF")
-        self.label_file_1.grid(row=1, column=1, padx=5, pady=5, sticky="w")
+        _fila(1, "Firma Banco (#1)")
+        _fila(2, "Firma Certificación (#2)")
+        _fila(3, "Reporte Licitados (#3)")
+        _fila(4, "Reporte con Categoría (#4)")
+        _fila(5, "Cargar RUT (Adicional)")
 
-        self.btn_export_1 = tk.Button(
-            self, text="Exportar #1 (Cruzado c/Matrícula)", bg="#cccccc", fg="white",
-            command=self.export_licitados_1
-        )
-        self.btn_export_1.grid(row=1, column=2, padx=5, pady=5)
+        # volver
+        tk.Button(self, text="Volver", bg="#aaaaaa", fg="white", command=lambda: controller.show_frame("IngresaFrame")).grid(row=6, column=0, columnspan=6, pady=20)
 
-        #
-        # SUB-PROCESO #2 (Firma en Certificación)
-        #
-        self.btn_cargar_2 = tk.Button(
-            self, text="Firma en Certificación (#2)", bg="#107FFD", fg="white",
-            command=self.load_file_licitados_2
-        )
-        self.btn_cargar_2.grid(row=2, column=0, padx=5, pady=5)
-
-        self.label_file_2 = tk.Label(self, text="Sin archivo (#2)", bg="#FFFFFF")
-        self.label_file_2.grid(row=2, column=1, padx=5, pady=5, sticky="w")
-
-        self.btn_export_2 = tk.Button(
-            self, text="Exportar #2 (Cruzado c/Matrícula)", bg="#cccccc", fg="white",
-            command=self.export_licitados_2
-        )
-        self.btn_export_2.grid(row=2, column=2, padx=5, pady=5)
-
-        #
-        # SUB-PROCESO #3 (Reporte Licitados)
-        #
-        self.btn_cargar_3 = tk.Button(
-            self, text="Reporte Licitados (#3)", bg="#107FFD", fg="white",
-            command=self.load_file_licitados_3
-        )
-        self.btn_cargar_3.grid(row=3, column=0, padx=5, pady=5)
-
-        self.label_file_3 = tk.Label(self, text="Sin archivo (#3)", bg="#FFFFFF")
-        self.label_file_3.grid(row=3, column=1, padx=5, pady=5, sticky="w")
-
-        self.btn_export_3 = tk.Button(
-            self, text="Exportar #3 (Cruzado c/Matrícula)", bg="#cccccc", fg="white",
-            command=self.export_licitados_3
-        )
-        self.btn_export_3.grid(row=3, column=2, padx=5, pady=5)
-
-        #
-        # SUB-PROCESO #4 (Reporte con Categoría)
-        #
-        self.btn_cargar_4 = tk.Button(
-            self, text="Reporte con Categoría (#4)", bg="#107FFD", fg="white",
-            command=self.load_file_licitados_4
-        )
-        self.btn_cargar_4.grid(row=4, column=0, padx=5, pady=5)
-
-        self.label_file_4 = tk.Label(self, text="Sin archivo (#4)", bg="#FFFFFF")
-        self.label_file_4.grid(row=4, column=1, padx=5, pady=5, sticky="w")
-
-        self.btn_export_4 = tk.Button(
-            self, text="Exportar #4 (Cruzado c/Matrícula)", bg="#cccccc", fg="white",
-            command=self.export_licitados_4
-        )
-        self.btn_export_4.grid(row=4, column=2, padx=5, pady=5)
-
-        #
-        # SUB-PROCESO "RUT" (NUEVO)
-        # Repite la misma lógica: se cruza con df_licitados, sin refinanciamiento
-        #
-        self.btn_cargar_rut = tk.Button(
-            self, text="Cargar RUT (Adicional)", bg="#107FFD", fg="white",
-            command=self.load_file_rut
-        )
-        self.btn_cargar_rut.grid(row=5, column=0, padx=5, pady=5)
-
-        self.label_file_rut = tk.Label(self, text="Sin archivo (RUT)", bg="#FFFFFF")
-        self.label_file_rut.grid(row=5, column=1, padx=5, pady=5, sticky="w")
-
-        self.btn_export_rut = tk.Button(
-            self, text="Exportar RUT (Cruzado c/Matrícula)", bg="#cccccc", fg="white",
-            command=self.export_rut
-        )
-        self.btn_export_rut.grid(row=5, column=2, padx=5, pady=5)
-
-        #
-        # Botón para volver
-        #
-        tk.Button(
-            self, text="Volver", bg="#aaaaaa", fg="white",
-            command=lambda: controller.show_frame("IngresaFrame")
-        ).grid(row=6, column=0, columnspan=3, pady=20)
-
-    # ------------------------------------
-    #       SUB-PROCESO #1
-    # ------------------------------------
-    def load_file_licitados_1(self):
-        df_csv, file_path = read_any_file("Firma Banco (#1)")
+    
+    #============================================================================
+   # ------------------------------------------------------------------
+    #  Cargar archivo
+    # ------------------------------------------------------------------
+    def load_file(self, idx):
+        nombres = {1: "Firma Banco (#1)", 2: "Firma Certificación (#2)", 3: "Reporte Licitados (#3)", 4: "Reporte con Categoría (#4)", 5: "Archivo RUT adicional"}
+        df_csv, path = read_any_file(nombres[idx])
         if df_csv is None:
             return
         if "RUT" not in df_csv.columns:
-            messagebox.showerror("Error", "El archivo #1 no contiene 'RUT'.")
+            messagebox.showerror("Error", f"El archivo #{idx} no contiene 'RUT'.")
             return
+        df_csv = df_csv[["RUT"]].copy()
+        setattr(self, f"df_csv_{idx}", df_csv.copy())
+        getattr(self, f"lbl_{idx}").config(text=f"Archivo #{idx}: {os.path.basename(path)}")
+        getattr(self, f"btn_run_{idx}").config(bg="#107FFD")
 
-        self.label_file_1.config(text=f"Archivo #1: {os.path.basename(file_path)}")
-
-        # Cruzamos con df_licitados
+    # ------------------------------------------------------------------
+    #  Run merge
+    # ------------------------------------------------------------------
+    def run_merge(self, idx):
         global df_licitados
-        if df_licitados is None or df_licitados.empty:
+        if df_licitados.empty:
             messagebox.showwarning("Sin datos", "df_licitados está vacío.")
             return
-        
-        df_licitados["PORCENTAJE_AVANCE"] = df_licitados['PORCENTAJE_AVANCE'].round(0)
-        df_licitados["RUT"] = df_licitados["RUT"].astype(str)
-        df_csv["RUT"] = df_csv["RUT"].astype(str)
-
-        self.df_resultado_1 = pd.merge(df_licitados, df_csv, on="RUT", how="inner")
-        self.btn_export_1.config(bg="#107FFD")
-
-    def export_licitados_1(self):
-        if self.df_resultado_1 is None:
-            messagebox.showwarning("Sin datos", "No hay datos para exportar (#1).")
-            return
-        self._save_df_to_excel(self.df_resultado_1, "Licitados_Seleccionados_1")
-
-
-    # ------------------------------------
-    #       SUB-PROCESO #2
-    # ------------------------------------
-    def load_file_licitados_2(self):
-        df_csv, file_path = read_any_file("Firma Certificación (#2)")
+        df_csv = getattr(self, f"df_csv_{idx}")
         if df_csv is None:
-            return
-        if "RUT" not in df_csv.columns:
-            messagebox.showerror("Error", "El archivo #2 no contiene la columna 'RUT'.")
+            messagebox.showwarning("Sin archivo", f"Primero carga el archivo #{idx}.")
             return
 
-        self.label_file_2.config(text=f"Archivo #2: {os.path.basename(file_path)}")
-
-        global df_licitados
-        if df_licitados is None or df_licitados.empty:
-            messagebox.showwarning("Sin datos", "df_licitados está vacío.")
-            return
-        df_licitados["PORCENTAJE_AVANCE"] = df_licitados['PORCENTAJE_AVANCE'].round(0)
         df_licitados["RUT"] = df_licitados["RUT"].astype(str)
         df_csv["RUT"] = df_csv["RUT"].astype(str)
 
-        self.df_resultado_2 = pd.merge(df_licitados, df_csv, on="RUT", how="inner")
-        self.btn_export_2.config(bg="#107FFD")
+        df_ok, df_nc = merge_and_clean(df_licitados, df_csv)
+        setattr(self, f"df_ok_{idx}", df_ok)
+        setattr(self, f"df_nc_{idx}", df_nc)
 
-    def export_licitados_2(self):
-        if self.df_resultado_2 is None:
-            messagebox.showwarning("Sin datos", "No hay datos para exportar (#2).")
+        # colores
+        getattr(self, f"btn_exp_ok_{idx}").config(bg="#228B22" if not df_ok.empty else "#B22222")
+        getattr(self, f"btn_exp_nc_{idx}").config(bg="#228B22" if not df_nc.empty else "#B22222")
+        getattr(self, f"btn_run_{idx}").config(bg="#228B22")
+
+        messagebox.showinfo("Cruce listo", f"#{idx}: {len(df_ok)} coincidentes, {len(df_nc)} sin cruce.")
+
+    # ------------------------------------------------------------------
+    #  Exportar
+    # ------------------------------------------------------------------
+    def exportar(self, idx, ok: bool = True):
+        df_attr = f"df_ok_{idx}" if ok else f"df_nc_{idx}"
+        df = getattr(self, df_attr)
+        if df is None or df.empty:
+            messagebox.showwarning("Sin datos", "No hay datos para exportar.")
             return
-        self._save_df_to_excel(self.df_resultado_2, "Licitados_Preseleccionados_2")
+        tipo = "OK" if ok else "NoCruce"
+        self._save_df_to_excel(df, f"Seguimiento_{tipo}_{idx}")
 
-
-    # ------------------------------------
-    #       SUB-PROCESO #3
-    # ------------------------------------
-    def load_file_licitados_3(self):
-        df_csv, file_path = read_any_file("Reporte Licitados (#3)")
-        if df_csv is None:
+    # ------------------------------------------------------------------
+    #  Exportar duplicados base
+    # ------------------------------------------------------------------
+    def exportar_duplicados(self):
+        if self.df_duplicados.empty:
+            messagebox.showinfo("Sin duplicados", "No se encontraron registros duplicados por RUT.")
             return
-        if "RUT" not in df_csv.columns:
-            messagebox.showerror("Error", "El archivo #3 no contiene la columna 'RUT'.")
+        self._save_df_to_excel(self.df_duplicados, "Duplicados_RUT")
+
+    # ------------------------------------------------------------------
+    #  Helper guardar Excel
+    # ------------------------------------------------------------------
+    def _save_df_to_excel(self, df, default_name):
+        path = filedialog.asksaveasfilename(title="Guardar Excel", defaultextension=".xlsx", filetypes=[("Excel","*.xlsx")], initialfile=f"{default_name}.xlsx")
+        if not path:
             return
-
-        self.label_file_3.config(text=f"Archivo #3: {os.path.basename(file_path)}")
-
-        global df_licitados
-        if df_licitados is None or df_licitados.empty:
-            messagebox.showwarning("Sin datos", "df_licitados está vacío.")
-            return
-        df_licitados["PORCENTAJE_AVANCE"] = df_licitados['PORCENTAJE_AVANCE'].round(0)
-        df_licitados["RUT"] = df_licitados["RUT"].astype(str)
-        df_csv["RUT"] = df_csv["RUT"].astype(str)
-
-        self.df_resultado_3 = pd.merge(df_licitados, df_csv, on="RUT", how="inner")
-        self.btn_export_3.config(bg="#107FFD")
-
-    def export_licitados_3(self):
-        if self.df_resultado_3 is None:
-            messagebox.showwarning("Sin datos", "No hay datos para exportar (#3).")
-            return
-        self._save_df_to_excel(self.df_resultado_3, "Licitados_NoSeleccionados_3")
-
-
-    # ------------------------------------
-    #       SUB-PROCESO #4
-    # ------------------------------------
-    def load_file_licitados_4(self):
-        df_csv, file_path = read_any_file("Reporte con Categoría (#4)")
-        if df_csv is None:
-            return
-        if "RUT" not in df_csv.columns:
-            messagebox.showerror("Error", "El archivo #4 no contiene la columna 'RUT'.")
-            return
-
-        self.label_file_4.config(text=f"Archivo #4: {os.path.basename(file_path)}")
-
-        global df_licitados
-        if df_licitados is None or df_licitados.empty:
-            messagebox.showwarning("Sin datos", "df_licitados está vacío.")
-            return
-        df_licitados["PORCENTAJE_AVANCE"] = df_licitados['PORCENTAJE_AVANCE'].round(0)
-        df_licitados["RUT"] = df_licitados["RUT"].astype(str)
-        df_csv["RUT"] = df_csv["RUT"].astype(str)
-
-        self.df_resultado_4 = pd.merge(df_licitados, df_csv, on="RUT", how="inner")
-        self.btn_export_4.config(bg="#107FFD")
-
-    def export_licitados_4(self):
-        if self.df_resultado_4 is None:
-            messagebox.showwarning("Sin datos", "No hay datos para exportar (#4).")
-            return
-        self._save_df_to_excel(self.df_resultado_4, "Licitados_Subproceso_4")
-
-
-    # ------------------------------------
-    #       NUEVO SUB-PROCESO (RUT)
-    # ------------------------------------
-    def load_file_rut(self):
-        """
-        Carga un archivo RUT adicional y lo cruza solo con df_licitados,
-        igual que los demás sub-procesos.
-        """
-        df_csv, file_path = read_any_file("Archivo RUT adicional")
-        if df_csv is None:
-            return
-        if "RUT" not in df_csv.columns:
-            messagebox.showerror("Error", "El archivo RUT no contiene la columna 'RUT'.")
-            return
-
-        self.label_file_rut.config(text=f"Archivo RUT: {os.path.basename(file_path)}")
-
-        global df_licitados
-        if df_licitados is None or df_licitados.empty:
-            messagebox.showwarning("Sin datos", "df_licitados está vacío.")
-            return
-        df_licitados["PORCENTAJE_AVANCE"] = df_licitados['PORCENTAJE_AVANCE'].round(0)
-        df_licitados["RUT"] = df_licitados["RUT"].astype(str)
-        df_csv["RUT"] = df_csv["RUT"].astype(str)
-
-        # Lo guardamos en una variable "df_resultado_rut" (análoga a #1..#4)
-        self.df_resultado_rut = pd.merge(df_licitados, df_csv, on='RUT', how='inner')
-
-        # Podríamos crear un botón "Exportar RUT" si lo deseas,
-        # pero en este ejemplo, usaremos el ya definido self.btn_export_rut
-        self.btn_export_rut.config(bg="#107FFD")
-
-    def export_rut(self):
-        if self.df_resultado_rut is None:
-            messagebox.showwarning("Sin datos", "No hay datos para exportar (RUT).")
-            return
-        self._save_df_to_excel(self.df_resultado_rut, "Licitados_RUT")
-
-
-    # ------------------------------------
-    #  FUNCIÓN AUXILIAR PARA EXPORTAR
-    # ------------------------------------
-    def _save_df_to_excel(self, df, default_name: str):
-        file_path = filedialog.asksaveasfilename(
-            title="Guardar archivo Excel",
-            defaultextension=".xlsx",
-            filetypes=[("Excel Files", "*.xlsx")],
-            initialfile=f"{default_name}.xlsx"
-        )
-        if file_path:
-            try:
-                df.to_excel(file_path, index=False)
-                messagebox.showinfo("Exportado", f"Se guardó en:\n{file_path}")
-            except Exception as e:
-                messagebox.showerror("Error", f"No se pudo exportar:\n{e}")
-        else:
-            messagebox.showinfo("Cancelado", "No se exportó el archivo.")
-
-
-
+        try:
+            df.to_excel(path, index=False)
+            messagebox.showinfo("Exportado", f"Archivo guardado en:\n{path}")
+        except Exception as e:
+            messagebox.showerror("Error", f"No se pudo exportar:\n{e}")
 
 
 
@@ -2650,460 +2905,352 @@ class SeguimientosFrame(tk.Frame):
 
 class EgresadosFrame(tk.Frame):
     """
-    Sub-proceso Egresados.
+     Sub-proceso EGRESADOS:
+      - Query base (df_egresados) con formato final.
+      - Cargar 5A, 5B, Deserotores -> Cruce / No Cruce por RUT.
+      - Unificar cruces (sin eliminar duplicados) con columna ARCHIVO_ORIGEN.
+      - Exportar/unificar/no_cruces y ver en pantalla.
+      - Botón para quitar duplicados del Cruce Unificado.
     """
+    COLUMN_ORDER = [
+        "RUT","DV","PATERNO","MATERNO","NOMBRES","SEXO","FECHA_NACIMIENTO",
+        "DIRECCION","NACIONALIDAD","COD_CIUDAD","COD_COMUNA","COD_REGION",
+        "FONO FIJO","MAIL_INSTITUCIONAL","FECHA_EGRESO","ANO_COHORTE",
+        "ANO_INGRESO_INSTITUCION","NOMBRE_CARRERA","CODIGO_TIPO_IES",
+        "CODIGO_DE_IES","CODIGO_DE_SEDE","CODIGO_CARRERA","CODIGO_JORNADA",
+        "JORNADA","ARANCEL_REAL_PESOS","ARANCEL_REFERENCIA","FECHA_ULTIMA_MATRICULA",
+        # Columnas extra que quieras agregar…
+    ]
     def __init__(self, parent, controller):
         super().__init__(parent)
         self.controller = controller
+        self.connection = connection1
         self.config(bg="#FFFFFF")
         
         # --------------------------------------------------------
         # 1) Ejecutamos la query al iniciar y guardamos en df_egresados
         # --------------------------------------------------------
         # Ajusta la conexión a la que necesites (connection1 o connection2).
-        
-        self.connection = connection1  
-        self.df_egresados = None
+        # DataFrames
+        self.df_egresados = pd.DataFrame()
+        self.df_cruce_5a = None; self.df_nc_5a = None
+        self.df_cruce_5b = None; self.df_nc_5b = None
+        self.df_cruce_des = None; self.df_nc_des = None
+
+        self.df_cruce_unificado = None
+        self.df_cruce_unificado_sin_dup = None
+        self.df_nc_union = None
+
+        # Cargamos query al iniciar
         self.run_query_egresados()
-        # DataFrames resultantes de cada “no cruce”
-        self.df_egresados_not_found_1 = None
-        self.df_egresados_not_found_2 = None
-        self.df_egresados_not_found_3 = None
-        self.df_egresados_not_found_4 = None
-        # --------------------------------------------------------
-        # 1.1) Configuramos el grid del propio Frame
-        # --------------------------------------------------------
-        # Ajusta la cantidad de filas/columnas según tu diseño
-        for row_idx in range(8):  # 0..6
-            self.rowconfigure(row_idx, weight=1)
-        for col_idx in range(3):  # 0..2
-            self.columnconfigure(col_idx, weight=1)
-        # --------------------------------------------------------
-        # 2) agregamos logo
-        # --------------------------------------------------------
-  # ========== PATRÓN PARA OBTENER RUTA IMAGEN ========== 
-        if hasattr(sys, '_MEIPASS'):
-            # Cuando está empaquetado con PyInstaller
-            base_path = sys._MEIPASS
-        else:
-            # Cuando corres el .py “normal”
-            base_path = os.path.dirname(os.path.abspath(__file__))
 
-        # Unir la carpeta y archivo de imagen
-        logo_path = os.path.join(base_path, 'images', 'logo.png')
-        
-        # Cargar la imagen usando logo_path
-        try:
-            self.logo = tk.PhotoImage(file=logo_path)
-            tk.Label(self, image=self.logo, bg="#FFFFFF").grid(row=0, column=0, columnspan=3, pady=(10,10))
-        except Exception as e:
-            print(f"No se pudo cargar la imagen del logo: {e}")
-            tk.Label(self, text="[Logo Aquí]", bg="#FFFFFF", fg="#107FFD",
-                     font=("Arial", 12, "bold")).grid(row=0, column=0, columnspan=3, pady=(10,10))
-        # --------------------------------------------------------
-        # 3) Interfaz de Tkinter (usando grid)
-        # --------------------------------------------------------
+        # ---------------- GRID ----------------
+        for r in range(12):
+            self.rowconfigure(r, weight=1)
+        for c in range(6):
+            self.columnconfigure(c, weight=1)
 
-        # Título (fila 1)
-        tk.Label(
-            self,
-            text="Sub-proceso: Egresados",
-            font=("Arial", 16, "bold"),
-            bg="#FFFFFF"
-        ).grid(row=1, column=0, columnspan=3, pady=(10,10))
+        # Logo
+        #self._add_logo()
 
-        # --------------------------------------------------------
-        # 4) Fila 2: Primer par de Cargar / Label / Export
-        # --------------------------------------------------------
-        # Botón "Cargar CSV #1"
-        self.btn_cargar_1 = tk.Button(
-            self, text="Cargar CSV Egresados 5A #1", bg="#107FFD", fg="white",
-            command=self.load_file_egresados_1
-        )
-        self.btn_cargar_1.grid(row=2, column=0, padx=5, pady=5)
+        tk.Label(self, text="Sub-proceso: Egresados", font=("Arial",16,"bold"),
+                 bg="#FFFFFF").grid(row=1,column=0,columnspan=6,pady=(5,10))
 
-        # Label para mostrar info del archivo
-        self.label_file_1 = tk.Label(
-            self, text="Sin archivo (#1)", bg="#FFFFFF"
-        )
-        self.label_file_1.grid(row=2, column=1, padx=5, pady=5, sticky="w")
+        # ---- 5A ----
+        self._make_file_section(row=2, tag="5A", load_cmd=self.load_5a)
 
-        # Botón "Exportar #1"
-        self.btn_export_1 = tk.Button(
-            self, text="Exportar NO Cruce #1", bg="#cccccc", fg="white",
-            command=self.export_egresados_1
-        )
-        self.btn_export_1.grid(row=2, column=2, padx=5, pady=5)
+        # ---- 5B ----
+        self._make_file_section(row=3, tag="5B", load_cmd=self.load_5b)
 
-        # --------------------------------------------------------
-        # 5) Fila 3: Segundo par de Cargar / Label / Export
-        # --------------------------------------------------------
-        self.btn_cargar_2 = tk.Button(
-            self, text="Cargar CSV Egresados 5B #2", bg="#107FFD", fg="white",
-            command=self.load_file_egresados_2
-        )
-        self.btn_cargar_2.grid(row=3, column=0, padx=5, pady=5)
+        # ---- DESERTORES ----
+        self._make_file_section(row=4, tag="DESERTORES", load_cmd=self.load_des)
 
-        self.label_file_2 = tk.Label(
-            self, text="Sin archivo (#2)", bg="#FFFFFF"
-        )
-        self.label_file_2.grid(row=3, column=1, padx=5, pady=5, sticky="w")
+        # ---- Botones Unificación / Duplicados / No Cruces ----
+        self.btn_unificar = tk.Button(self, text="Unificar Cruces (5A+5B+DES)",
+                                      bg="#cccccc", fg="white",
+                                      command=self.unificar_cruces, state="disabled")
+        self.btn_unificar.grid(row=5,column=0,padx=5,pady=5,sticky="we")
 
-        self.btn_export_2 = tk.Button(
-            self, text="Exportar NO Cruce #2", bg="#cccccc", fg="white",
-            command=self.export_egresados_2
-        )
-        self.btn_export_2.grid(row=3, column=2, padx=5, pady=5)
+        self.btn_ver_unificado = tk.Button(self,text="Ver Cruce Unificado",
+                                           bg="#cccccc",state="disabled",
+                                           command=lambda:self._show_df(self.df_cruce_unificado,"Cruce Unificado"))
+        self.btn_ver_unificado.grid(row=5,column=1,padx=5)
 
-        # --------------------------------------------------------
-        # 6) Fila 4: Tercer par de Cargar / Label / Export
-        # --------------------------------------------------------
-        self.btn_cargar_3 = tk.Button(
-            self, text="Cargar CSV Egresados DESERTORES #3", bg="#107FFD", fg="white",
-            command=self.load_file_egresados_3
-        )
-        self.btn_cargar_3.grid(row=4, column=0, padx=5, pady=5)
+        self.btn_export_unificado = tk.Button(self,text="Exportar Unificado",
+                                              bg="#cccccc",fg="white",state="disabled",
+                                              command=lambda:self._save_df(self.df_cruce_unificado,"Cruce_Unificado"))
+        self.btn_export_unificado.grid(row=5,column=2,padx=5)
 
-        self.label_file_3 = tk.Label(
-            self, text="Sin archivo (#3)", bg="#FFFFFF"
-        )
-        self.label_file_3.grid(row=4, column=1, padx=5, pady=5, sticky="w")
+        self.btn_quitar_dup = tk.Button(self,text="Quitar Duplicados (RUT)",
+                                        bg="#cccccc",fg="white",state="disabled",
+                                        command=self.quitar_duplicados_unificado)
+        self.btn_quitar_dup.grid(row=5,column=3,padx=5)
 
-        self.btn_export_3 = tk.Button(
-            self, text="Exportar NO Cruce #3", bg="#cccccc", fg="white",
-            command=self.export_egresados_3
-        )
-        self.btn_export_3.grid(row=4, column=2, padx=5, pady=5)
+        self.btn_export_unificado_sin = tk.Button(self,text="Exportar Unificado SIN Dup",
+                                                  bg="#cccccc",fg="white",state="disabled",
+                                                  command=lambda:self._save_df(self.df_cruce_unificado_sin_dup,"Cruce_Unificado_SinDup"))
+        self.btn_export_unificado_sin.grid(row=5,column=4,padx=5)
 
-        # --------------------------------------------------------
-        # 7) Botón Volver (fila 5)
-        # --------------------------------------------------------
-        tk.Button(
-            self, text="Volver", bg="#aaaaaa", fg="white",
-            command=lambda: controller.show_frame("IngresaFrame")
-        ).grid(row=6, column=0, columnspan=3, pady=(20,10))
+        self.btn_export_nc_union = tk.Button(self,text="Exportar Unión NO Cruces",
+                                             bg="#cccccc",fg="white",state="disabled",
+                                             command=lambda:self._save_df(self.df_nc_union,"Union_NoCruces"))
+        self.btn_export_nc_union.grid(row=5,column=5,padx=5)
 
-        # --------------------------------------------------------
-        # Fila para el 4to botón
-        # --------------------------------------------------------
-        self.btn_cargar_4 = tk.Button(
-            self,
-            text="Cargar CSV/TXT Egresados",
-            bg="#107FFD", fg="white",
-            command=self.load_file_vs_no_cruces
-        )
-        self.btn_cargar_4.grid(row=5, column=0, padx=5, pady=5)
+        # Status
+        self.lbl_status = tk.Label(self,text="",bg="#FFFFFF",anchor="w",justify="left")
+        self.lbl_status.grid(row=6,column=0,columnspan=6,sticky="we")
 
-        self.label_file_4 = tk.Label(
-            self, text="Sin archivo (#4)", bg="#FFFFFF"
-        )
-        self.label_file_4.grid(row=5, column=1, padx=5, pady=5, sticky="w")
-
-        self.btn_export_4 = tk.Button(
-            self,
-            text="Exportar NO Cruce #4",
-            bg="#cccccc", fg="white",
-            command=self.export_vs_no_cruces
-        )
-        self.btn_export_4.grid(row=5, column=2, padx=5, pady=5)
+        tk.Button(self,text="Volver",bg="#aaaaaa",fg="white",
+                  command=lambda: controller.show_frame("IngresaFrame")).grid(row=11,column=0,columnspan=6,pady=(15,10))
 
 
+    def _make_file_section(self, row:int, tag:str, load_cmd):
+        """
+        Crea fila con:
+           Cargar <tag> | Ver Cruce | Export Cruce | Export No Cruce | Ver No Cruce
+        """
+        btn = tk.Button(self,text=f"Cargar {tag}",bg="#107FFD",fg="white",command=load_cmd)
+        btn.grid(row=row,column=0,padx=5,pady=3,sticky="we")
 
+        setattr(self,f"lbl_{tag}", tk.Label(self,text=f"Sin {tag}",bg="#FFFFFF"))
+        getattr(self,f"lbl_{tag}").grid(row=row,column=1,sticky="w")
+
+        setattr(self,f"btn_ver_cruce_{tag}",
+                tk.Button(self,text="Ver Cruce",bg="#cccccc",state="disabled",
+                          command=lambda t=tag: self._show_df(getattr(self,f'df_cruce_{self._tag_key(tag)}'),f"Cruce {t}")))
+        getattr(self,f"btn_ver_cruce_{tag}").grid(row=row,column=2)
+
+        setattr(self,f"btn_export_cruce_{tag}",
+                tk.Button(self,text="Exportar Cruce",bg="#cccccc",fg="white",state="disabled",
+                          command=lambda t=tag: self._save_df(getattr(self,f'df_cruce_{self._tag_key(tag)}'),f"Cruce_{t}")))
+        getattr(self,f"btn_export_cruce_{tag}").grid(row=row,column=3)
+
+        setattr(self,f"btn_ver_nc_{tag}",
+                tk.Button(self,text="Ver NO Cruce",bg="#cccccc",state="disabled",
+                          command=lambda t=tag: self._show_df(getattr(self,f'df_nc_{self._tag_key(tag)}'),f"NoCruce_{t}")))
+        getattr(self,f"btn_ver_nc_{tag}").grid(row=row,column=4)
+
+        setattr(self,f"btn_export_nc_{tag}",
+                tk.Button(self,text="Exportar NO Cruce",bg="#cccccc",fg="white",state="disabled",
+                          command=lambda t=tag: self._save_df(getattr(self,f'df_nc_{self._tag_key(tag)}'),f"NoCruce_{t}")))
+        getattr(self,f"btn_export_nc_{tag}").grid(row=row,column=5)
+
+    def _tag_key(self, tag:str)->str:
+        return "des" if tag=="DESERTORES" else tag.lower()
+
+    # ------------------------------------------------------------------
+    # Query
+    # ------------------------------------------------------------------
     def run_query_egresados(self):
+        """
+        Ejecuta la query y deja df_egresados con columnas en formato final.
+        Evitamos post-procesar demasiado fuera: renombramos aquí.
+        """
         query = text("""
-                        select
-                            b.RUT,
-                            c.DV, 
-                            a.CODCLI,
-                            CODIGO_SIES_COMPLETO,
-                            PATERNO, 
-                            MATERNO, 
-                            NOMBRES, 
-                            GENERO, 
-                            c.FECH_NAC,
-                            DIRECCION,
-                            NACIONALIDAD,
-                            (SELECT TOP 1 X.CODIGO_CIUDAD FROM dim_territorio_ingresa X WHERE X.CODIGO_COMUNA=I.COD_COMUNA) COD_CIUDAD,
-                            (SELECT TOP 1 X.CODIGO_COMUNA FROM dim_territorio_ingresa X WHERE X.CODIGO_COMUNA=I.COD_COMUNA) COD_COMUNA, 
-                            (SELECT TOP 1 X.CODIGO_REGION FROM dim_territorio_ingresa X WHERE X.CODIGO_COMUNA=I.COD_COMUNA) COD_REGION,
-                            c.TELEFONO, 
-                            c.MAIL_UNIACC, 
-                            FECHA_EGRESO,
-                            pm.PERIODO as ANO_COHORTE,
-                            pm.PERIODO as ANO_INGRESO_INSTITUCION,
-                            d.NOMBRE_CARRERA,
-                                1 as 'CODIGO_TIPO_IES',
-                                13  as 'CODIGO_DE_IES',
-                                j.SEDEN_COD  as 'CODIGO_DE_SEDE',
-                                j.CARRN_COD  as 'CODIGO_CARRERA',
-                                j.JORNN_COD  as 'CODIGO_JORNADA', 
-                                    CASE WHEN j.JORNN_COD=1 THEN 'Diurno' ELSE 'Vespertino/Semipresencial/Online'END AS 'JORNADA',
-                            F.ARANCEL_ANUAL AS 'ARANCEL_REAL_ANUAL',
-                            0 AS 'ARANCEL DE REFERENCIA',FECHA_MAT -- SE CARGA A MANO POSTERIOR A LA GENERACIÓN DEL ARCHIVO EXCEL-SE INCORPORA FECHA MAT
-                        from ft_egreso a
-                        left join (select distinct CODCLI, PERIODO from ft_matricula where MAT_N = 1 ) pm on a.codcli = pm.codcli
-                        inner join dim_matricula b on a.CODCLI = b.CODCLI
-                        inner join dim_alumno c on b.RUT = c.RUT
-                        inner join dim_plan_academico d on b.CODPLAN = d.LLAVE_MALLA
-                        inner join (select  CODIGO_SIES, ARANCEL_ANUAL,
-                                            ROW_NUMBER() over (partition by CODIGO_SIES order by periodo desc )	as numero
-                                            from dim_oferta_academica) f  on d.CODIGO_SIES_COMPLETO = f.CODIGO_SIES and numero = 1
-                        left join dim_territorio i on c.COMUNA=i.COMUNA
-                        left join (select distinct [CODIGO SIES SIN VERSION], SEDEN_COD, CARRN_COD, JORNN_COD, NOMBRE_CARRERA,
-                                ROW_NUMBER() over (partition by [CODIGO SIES SIN VERSION] order by[CODIGO SIES SIN VERSION] )	as numero
-                                    from oferta_academica_ingresa where carrera_discontinua = 'NO'	) j
-                        on left (d.CODIGO_SIES_COMPLETO,LEN (d.CODIGO_SIES_COMPLETO)-2)=j.[CODIGO SIES SIN VERSION]
-                        inner join (select CODCLI, FECHA_MAT,    
-                                ROW_NUMBER() OVER (partition by CODCLI ORDER BY FECHA_MAT DESC) AS numero
-                                from ft_matricula) fm on a.CODCLI = fm.CODCLI and fm.numero = 1
-                        where 1 = 1
-                        and d.NIVEL_GLOBAL = 'PREGRADO'
-                        and CODIGO_SIES_COMPLETO <> '0'		
+            SELECT
+                b.RUT,
+                c.DV,
+                PATERNO,
+                MATERNO,
+                NOMBRES,
+                CASE WHEN GENERO='F' THEN 'F' ELSE 'M' END AS SEXO,
+                c.FECH_NAC AS FECHA_NACIMIENTO,
+                DIRECCION,
+                NACIONALIDAD,
+                (SELECT TOP 1 X.CODIGO_CIUDAD FROM dim_territorio_ingresa X WHERE X.CODIGO_COMUNA=I.COD_COMUNA) COD_CIUDAD,
+                (SELECT TOP 1 X.CODIGO_COMUNA FROM dim_territorio_ingresa X WHERE X.CODIGO_COMUNA=I.COD_COMUNA) COD_COMUNA, 
+                (SELECT TOP 1 X.CODIGO_REGION FROM dim_territorio_ingresa X WHERE X.CODIGO_COMUNA=I.COD_COMUNA) COD_REGION,
+                c.TELEFONO AS [FONO FIJO],
+                c.MAIL_UNIACC AS MAIL_INSTITUCIONAL,
+                FECHA_EGRESO,
+                pm.PERIODO AS ANO_COHORTE,
+                pm.PERIODO AS ANO_INGRESO_INSTITUCION,
+                d.NOMBRE_CARRERA,
+                1 AS CODIGO_TIPO_IES,
+                13 AS CODIGO_DE_IES,
+                j.SEDEN_COD AS CODIGO_DE_SEDE,
+                j.CARRN_COD AS CODIGO_CARRERA,
+                j.JORNN_COD AS CODIGO_JORNADA,
+                CASE WHEN j.JORNN_COD=1 THEN 'Diurno' ELSE 'Vespertino/Semipresencial/Online' END AS JORNADA,
+                F.ARANCEL_ANUAL AS ARANCEL_REAL_PESOS,
+                0 AS ARANCEL_REFERENCIA,
+                fm.FECHA_MAT AS FECHA_ULTIMA_MATRICULA
+            FROM ft_egreso a
+              LEFT JOIN (SELECT DISTINCT CODCLI, PERIODO FROM ft_matricula WHERE MAT_N=1) pm ON a.codcli = pm.codcli
+              INNER JOIN dim_matricula b ON a.CODCLI = b.CODCLI
+              INNER JOIN dim_alumno c ON b.RUT = c.RUT
+              INNER JOIN dim_plan_academico d ON b.CODPLAN = d.LLAVE_MALLA
+              INNER JOIN (
+                    SELECT CODIGO_SIES, ARANCEL_ANUAL,
+                           ROW_NUMBER() over (partition by CODIGO_SIES order by periodo desc ) numero
+                    FROM dim_oferta_academica
+              ) f ON d.CODIGO_SIES_COMPLETO = f.CODIGO_SIES AND numero=1
+              LEFT JOIN dim_territorio i ON c.COMUNA=i.COMUNA
+              LEFT JOIN (
+                    SELECT DISTINCT [CODIGO SIES SIN VERSION], SEDEN_COD, CARRN_COD, JORNN_COD, NOMBRE_CARRERA,
+                           ROW_NUMBER() OVER (PARTITION BY [CODIGO SIES SIN VERSION] ORDER BY [CODIGO SIES SIN VERSION]) numero
+                    FROM oferta_academica_ingresa
+                    WHERE carrera_discontinua='NO'
+              ) j ON LEFT(d.CODIGO_SIES_COMPLETO, LEN(d.CODIGO_SIES_COMPLETO)-2)=j.[CODIGO SIES SIN VERSION]
+              INNER JOIN (
+                    SELECT CODCLI, FECHA_MAT,
+                           ROW_NUMBER() OVER (PARTITION BY CODCLI ORDER BY FECHA_MAT DESC) AS numero
+                    FROM ft_matricula
+              ) fm ON a.CODCLI = fm.CODCLI AND fm.numero=1
+            WHERE d.NIVEL_GLOBAL='PREGRADO'
+              AND d.CODIGO_SIES_COMPLETO <> '0'
         """)
         try:
             if self.connection is not None:
-                self.df_egresados = pd.read_sql_query(query, self.connection)
-                print("Query ejecutada y df_egresados cargado correctamente.")
+                df = pd.read_sql_query(query, self.connection)
+                # Limpieza y orden
+                df["RUT"] = _clean_rut(df["RUT"])
+                # Aplica validaciones reutilizadas
+                df = validate_minud(_ensure(df))
+                # Forzamos orden de columnas (las que existan)
+                cols = [c for c in self.COLUMN_ORDER if c in df.columns]
+                self.df_egresados = df[cols].copy()
+                print(f"Query egresados OK: {len(self.df_egresados)} filas.")
             else:
-                print("No se ejecutó la query: conexión no proporcionada.")
+                messagebox.showerror("Error","No hay conexión para ejecutar la query.")
         except Exception as e:
-            print(f"Error al ejecutar query: {e}")
+            messagebox.showerror("Error", f"Fallo al ejecutar query: {e}")
 
-    
-    # ----------------------------------------------------------------
-    # 2) LOAD / MERGE / FILTRO NO CRUCE (por RUT)
-    # ----------------------------------------------------------------
-    def load_file_egresados_1(self):
-        """
-        Carga un archivo CSV Egresados #1, cruza por RUT contra df_egresados_query
-        y deja en self.df_egresados_not_found_1 lo que NO cruza.
-        """
-        file_path = filedialog.askopenfilename(
-            title="Seleccionar CSV Egresados #1",
-            filetypes=[("CSV Files", "*.csv"), ("TXT Files", "*.txt"), ("All", "*.*")]
-        )
-        if file_path:
-            df_loaded = read_any_file(file_path)
-            if df_loaded is not None:
-                # Nos aseguramos de que exista la columna "RUT" (ajusta a tu columna real)
-                if "RUT" not in df_loaded.columns:
-                    messagebox.showerror("Error", "El CSV no contiene la columna 'RUT'.")
-                    return
+    # ------------------------------------------------------------------
+    # LOADERS
+    # ------------------------------------------------------------------
+    def load_5a(self):  self._load_generic(tag="5A")
+    def load_5b(self):  self._load_generic(tag="5B")
+    def load_des(self): self._load_generic(tag="DESERTORES")
 
-                self.label_file_1.config(text=f"Archivo #1: {os.path.basename(file_path)}")
-                  # Convertir a str
-                df_loaded['RUT'] = df_loaded['RUT'].astype(str)
-                self.df_egresados['RUT'] = self.df_egresados['RUT'].astype(str)
-                # Hacemos el cruce "left" y filtramos los que no matchean
-                df_result = pd.merge(
-                    df_loaded,
-                    self.df_egresados[["RUT"]] if self.df_egresados is not None else pd.DataFrame(columns=["RUT"]),
-                    on="RUT",
-                    how="left",
-                    indicator=True
-                )
-                # Nos quedamos solo con left_only (RUT que NO existen en df_egresados_query)
-                df_result = df_result[df_result["_merge"] == "left_only"].drop(columns="_merge")
+    def _load_generic(self, tag:str):
+        df, path = read_any_file(f"Archivo {tag}")
+        if df is None: return
+        if "RUT" not in df.columns:
+            messagebox.showerror("Error", f"{tag} sin columna RUT"); return
 
-                self.df_egresados_not_found_1 = df_result
-                # Cambiamos color del botón "Exportar" a azul (ahora hay algo que exportar)
-                self.btn_export_1.config(bg="#107FFD")
+        df["RUT"] = _clean_rut(df["RUT"])
+        self.df_egresados["RUT"] = _clean_rut(self.df_egresados["RUT"])
 
-                messagebox.showinfo("Cargado", f"Archivo #1 cargado. {len(df_result)} filas no cruzan.")
-        else:
-            messagebox.showinfo("Cancelado", "No se seleccionó archivo.")
+        # Cruce
+        cruce = pd.merge(df, self.df_egresados, on="RUT", how="inner")  # mantiene columnas archivo + query
+        cruce.insert(0,"ARCHIVO_ORIGEN",tag)
+        # No Cruce
+        nc = df[~df["RUT"].isin(cruce["RUT"])].copy()
 
-    def load_file_egresados_2(self):
-        file_path = filedialog.askopenfilename(
-            title="Seleccionar CSV Egresados #2",
-            filetypes=[("CSV Files", "*.csv"), ("TXT Files", "*.txt"), ("All", "*.*")]
-        )
-        if file_path:
-            df_loaded = read_any_file(file_path)
-            if df_loaded is not None:
-                if "RUT" not in df_loaded.columns:
-                    messagebox.showerror("Error", "El CSV #2 no contiene la columna 'RUT'.")
-                    return
+        # Guardamos
+        key = self._tag_key(tag)
+        setattr(self, f"df_cruce_{key}", cruce)
+        setattr(self, f"df_nc_{key}", nc)
 
-                self.label_file_2.config(text=f"Archivo #2: {os.path.basename(file_path)}")
-                df_loaded['RUT'] = df_loaded['RUT'].astype(str)
-                self.df_egresados['RUT'] = self.df_egresados['RUT'].astype(str)
-                df_result = pd.merge(
-                    df_loaded,
-                    self.df_egresados[["RUT"]] if self.df_egresados is not None else pd.DataFrame(columns=["RUT"]),
-                    on="RUT",
-                    how="left",
-                    indicator=True
-                )
-                df_result = df_result[df_result["_merge"] == "left_only"].drop(columns="_merge")
+        getattr(self, f"lbl_{tag}").config(text=os.path.basename(path))
+        getattr(self, f"btn_ver_cruce_{tag}").config(state="normal",bg="#107FFD")
+        getattr(self, f"btn_export_cruce_{tag}").config(state="normal",bg="#107FFD")
+        getattr(self, f"btn_ver_nc_{tag}").config(state="normal",bg="#107FFD")
+        getattr(self, f"btn_export_nc_{tag}").config(state="normal",bg="#107FFD")
 
-                self.df_egresados_not_found_2 = df_result
-                self.btn_export_2.config(bg="#107FFD")
+        messagebox.showinfo("Cargado",
+                            f"{tag} cargado.\nCruce: {len(cruce)} filas\nNo Cruce: {len(nc)} filas.")
 
-                messagebox.showinfo("Cargado", f"Archivo #2 cargado. {len(df_result)} filas no cruzan.")
-        else:
-            messagebox.showinfo("Cancelado", "No se seleccionó archivo.")
+        # Habilitamos unificación si existen al menos uno
+        if any(getattr(self,f"df_cruce_{k}") is not None for k in ["5a","5b","des"]):
+            self.btn_unificar.config(state="normal",bg="#107FFD")
 
-    def load_file_egresados_3(self):
-        file_path = filedialog.askopenfilename(
-            title="Seleccionar CSV Egresados #3",
-            filetypes=[("CSV Files", "*.csv"), ("TXT Files", "*.txt"), ("All", "*.*")]
-        )
-        if file_path:
-            df_loaded = read_any_file(file_path)
-            if df_loaded is not None:
-                if "RUT" not in df_loaded.columns:
-                    messagebox.showerror("Error", "El CSV #3 no contiene la columna 'RUT'.")
-                    return
+        self._refresh_status()
 
-                self.label_file_3.config(text=f"Archivo #3: {os.path.basename(file_path)}")
-                df_loaded['RUT'] = df_loaded['RUT'].astype(str)
-                self.df_egresados['RUT'] = self.df_egresados['RUT'].astype(str)
-                
-                df_result = pd.merge(
-                    df_loaded,
-                    self.df_egresados[["RUT"]] if self.df_egresados is not None else pd.DataFrame(columns=["RUT"]),
-                    on="RUT",
-                    how="left",
-                    indicator=True
-                )
-                df_result = df_result[df_result["_merge"] == "left_only"].drop(columns="_merge")
+    # ------------------------------------------------------------------
+    # Unificación / Duplicados
+    # ------------------------------------------------------------------
+    def unificar_cruces(self):
+        frames = []
+        for k in ["5a","5b","des"]:
+            dfc = getattr(self,f"df_cruce_{k}")
+            if dfc is not None and not dfc.empty:
+                frames.append(dfc)
+        if not frames:
+            messagebox.showinfo("Sin datos","No hay cruces para unificar."); return
 
-                self.df_egresados_not_found_3 = df_result
-                self.btn_export_3.config(bg="#107FFD")
+        self.df_cruce_unificado = pd.concat(frames, ignore_index=True)
+        # Unión NO cruces (por si la quieres exportar)
+        nc_frames = []
+        for k in ["5a","5b","des"]:
+            dfnc = getattr(self,f"df_nc_{k}")
+            if dfnc is not None and not dfnc.empty:
+                nc_frames.append(dfnc[["RUT"]])
+        self.df_nc_union = pd.concat(nc_frames, ignore_index=True).drop_duplicates() if nc_frames else pd.DataFrame(columns=["RUT"])
 
-                messagebox.showinfo("Cargado", f"Archivo #3 cargado. {len(df_result)} filas no cruzan.")
-        else:
-            messagebox.showinfo("Cancelado", "No se seleccionó archivo.")
+        self.btn_ver_unificado.config(state="normal",bg="#107FFD")
+        self.btn_export_unificado.config(state="normal",bg="#107FFD")
+        self.btn_quitar_dup.config(state="normal",bg="#107FFD")
+        if not self.df_nc_union.empty:
+            self.btn_export_nc_union.config(state="normal",bg="#107FFD")
 
-    # ----------------------------------------------------------------
-    # 3) EXPORTAR: Guarda el DF "no cruzado" en Excel
-    # ----------------------------------------------------------------
-    def export_egresados_1(self):
-        if self.df_egresados_not_found_1 is None:
-            messagebox.showwarning("Sin datos", "No hay datos para exportar (#1).")
+        messagebox.showinfo("Unificado", f"Cruce unificado creado: {len(self.df_cruce_unificado)} filas (con duplicados).")
+        self._refresh_status()
+
+    def quitar_duplicados_unificado(self):
+        if self.df_cruce_unificado is None:
             return
-        self._save_df_to_excel(self.df_egresados_not_found_1, "Egresados_NO_Cruce_1")
+        # Conserva la primera aparición por RUT
+        self.df_cruce_unificado_sin_dup = self.df_cruce_unificado.sort_index().drop_duplicates(subset="RUT", keep="first")
+        self.btn_export_unificado_sin.config(state="normal",bg="#107FFD")
+        self._show_df(self.df_cruce_unificado_sin_dup,"Cruce Unificado SIN Duplicados")
+        self._refresh_status()
 
-    def export_egresados_2(self):
-        if self.df_egresados_not_found_2 is None:
-            messagebox.showwarning("Sin datos", "No hay datos para exportar (#2).")
-            return
-        self._save_df_to_excel(self.df_egresados_not_found_2, "Egresados_NO_Cruce_2")
+    # ------------------------------------------------------------------
+    # Estado
+    # ------------------------------------------------------------------
+    def _refresh_status(self):
+        parts=[]
+        for tag,k in [("5A","5a"),("5B","5b"),("DES","des")]:
+            cr = getattr(self,f"df_cruce_{k}")
+            nc = getattr(self,f"df_nc_{k}")
+            if cr is not None:
+                parts.append(f"{tag}: Cruce {len(cr)} / NoCruce {len(nc) if nc is not None else 0}")
+        if self.df_cruce_unificado is not None:
+            parts.append(f"Unificado: {len(self.df_cruce_unificado)} filas")
+        if self.df_cruce_unificado_sin_dup is not None:
+            parts.append(f"Unificado SIN Dup: {len(self.df_cruce_unificado_sin_dup)} filas")
+        if self.df_nc_union is not None and not self.df_nc_union.empty:
+            parts.append(f"Unión NO Cruces: {len(self.df_nc_union)} RUT únicos")
+        self.lbl_status.config(text=" | ".join(parts))
 
-    def export_egresados_3(self):
-        if self.df_egresados_not_found_3 is None:
-            messagebox.showwarning("Sin datos", "No hay datos para exportar (#3).")
-            return
-        self._save_df_to_excel(self.df_egresados_not_found_3, "Egresados_NO_Cruce_3")
+    # ------------------------------------------------------------------
+    # Helpers ver/exportar
+    # ------------------------------------------------------------------
+    def _show_df(self, df, title):
+        if df is None or df.empty:
+            messagebox.showinfo("Sin datos","No hay datos para mostrar."); return
+        win = tk.Toplevel(self); win.title(title)
+        frame = ttk.Frame(win); frame.pack(fill="both",expand=True)
+        cols=list(df.columns)
+        tree=ttk.Treeview(frame,columns=cols,show="headings")
+        vsb=ttk.Scrollbar(frame,orient="vertical",command=tree.yview)
+        tree.configure(yscrollcommand=vsb.set)
+        tree.pack(side="left",fill="both",expand=True); vsb.pack(side="right",fill="y")
+        for c in cols:
+            tree.heading(c,text=c); tree.column(c,width=120,anchor="w")
+        # limit rows for speed (opcional)
+        for _,row in df.iterrows():
+            tree.insert("", "end", values=[row[c] for c in cols])
 
-
-        # ------------------------------------------------------------
-    # [NUEVO] Cargar 4to archivo vs no-cruces #1,#2,#3
-    # ------------------------------------------------------------
-    def load_file_vs_no_cruces(self):
-        file_path = filedialog.askopenfilename(
-            title="Seleccionar CSV/TXT para cruzar vs. NO Cruce #1,#2,#3",
-            filetypes=[
-                ("CSV Files", "*.csv"),
-                ("TXT Files", "*.txt"),
-                ("All", "*.*")
-            ]
-        )
-        if not file_path:
-            messagebox.showinfo("Cancelado", "No se seleccionó archivo.")
-            return
-
-        # Leemos CSV/TXT con la misma función que usas antes:
-        df_loaded = read_any_file(file_path)
-        if df_loaded is None:
-            messagebox.showerror("Error", "No se pudo leer el archivo CSV/TXT.")
-            return
-
-        if "RUT" not in df_loaded.columns:
-            messagebox.showerror("Error", "El archivo no contiene la columna 'RUT'.")
-            return
-
-        self.label_file_4.config(text=f"Archivo #4: {os.path.basename(file_path)}")
-        df_loaded["RUT"] = df_loaded["RUT"].astype(str)
-
-        # Unimos las 3 salidas de no-cruce (si alguna es None, la ignoramos).
-        frames_no_cruce = []
-        if self.df_egresados_not_found_1 is not None:
-            frames_no_cruce.append(self.df_egresados_not_found_1[["RUT"]])
-        if self.df_egresados_not_found_2 is not None:
-            frames_no_cruce.append(self.df_egresados_not_found_2[["RUT"]])
-        if self.df_egresados_not_found_3 is not None:
-            frames_no_cruce.append(self.df_egresados_not_found_3[["RUT"]])
-
-        if len(frames_no_cruce) == 0:
-            messagebox.showinfo(
-                "Sin cruces previos",
-                "No hay datos de no-cruce (#1,#2,#3), no se puede comparar."
-            )
-            return
-
-        # Concatenamos y quitamos duplicados de RUT
-        df_no_cruces_union = pd.concat(frames_no_cruce, ignore_index=True).drop_duplicates()
-
-        # Merge para quedarnos con los RUT que no estén en df_no_cruces_union
-        df_result = pd.merge(
-            df_loaded,
-            df_no_cruces_union,
-            on="RUT",
-            how="left",
-            indicator=True
-        )
-        # Nos quedamos con los que no matchean (left_only)
-        df_result = df_result[df_result["_merge"] == "left_only"].drop(columns="_merge")
-
-        self.df_egresados_not_found_4 = df_result
-        self.btn_export_4.config(bg="#107FFD")
-
-        messagebox.showinfo(
-            "Cargado",
-            f"Archivo #4 cargado. {len(df_result)} filas NO se cruzan "
-            "con las salidas de #1,#2,#3."
-        )
-
-    def export_vs_no_cruces(self):
-        if self.df_egresados_not_found_4 is None:
-            messagebox.showwarning("Sin datos", "No hay datos para exportar (#4).")
-            return
-        self._save_df_to_excel(self.df_egresados_not_found_4, "Egresados_NO_Cruce_4")
-    def _save_df_to_excel(self, df: pd.DataFrame, default_name: str):
-        """
-        Abre un diálogo para guardar el DataFrame en un Excel (.xlsx).
-        """
-        file_path = filedialog.asksaveasfilename(
-            title="Guardar archivo Excel",
-            defaultextension=".xlsx",
-            filetypes=[("Excel Files", "*.xlsx")],
+    def _save_df(self, df, default_name):
+        if df is None or df.empty:
+            messagebox.showinfo("Sin datos","No hay datos para exportar."); return
+        path=filedialog.asksaveasfilename(
+            title="Guardar Excel",defaultextension=".xlsx",
+            filetypes=[("Excel","*.xlsx")],
             initialfile=f"{default_name}.xlsx"
         )
-        if file_path:
-            try:
-                df.to_excel(file_path, index=False)
-                messagebox.showinfo("Exportado", f"Se guardó el archivo en:\n{file_path}")
-            except Exception as e:
-                messagebox.showerror("Error", f"No se pudo exportar:\n{e}")
-        else:
-            messagebox.showinfo("Cancelado", "No se exportó el archivo.")
-""" DUPLICADO?
-class ValidacionesFrame(tk.Frame):
-    def __init__(self, parent, controller):
-        super().__init__(parent)
-        self.controller = controller
-        self.config(bg="#FFFFFF")
-        tk.Label(
-            self, text="Validaciones Previas", bg="#FFFFFF", fg="#107FFD",
-            font=("Arial", 20, "bold")
-        ).pack(pady=20)
-        tk.Button(
-            self, text="Volver Menú", bg="#aaaaaa", fg="white",
-            command=lambda: controller.show_frame("MainMenuFrame")
-        ).pack(pady=20)
-"""
+        if not path: return
+        try:
+            df.to_excel(path,index=False)
+            messagebox.showinfo("Exportado",f"Guardado en:\n{path}")
+        except Exception as e:
+            messagebox.showerror("Error",str(e))
+
+#====================================================================================
+#====================================================================================
 
 class BecasFrame(tk.Frame):
     """
@@ -4580,761 +4727,8 @@ class BecasRenovantesFrame(tk.Frame):
             except Exception as e:
                 messagebox.showerror("Error", f"Error al guardar Excel.\n{e}")
 
-# ============================================================== 
-#       CLASE SOLICITUD DE MONTO (ADAPTADA) 
-# ============================================================== 
 
-
-class SolicitudMontoFrame(tk.Frame):
-    """
-    Flujo:
-      1) Cargar Excel de refinanciamiento (df_extra).
-      2) Cargar archivos 1A y 1B.
-      3) "Exportar cruce con Matrícula" -> (1A + 1B) se cruzan con df_licitados => self.df_result
-      4) Se habilita "Exportar cruce con refinanciamiento" (para 1A+1B)
-         -> self.df_result se cruza con df_extra.
-      5) NUEVO: Botón para cargar RUT (1C) en otra fila.
-         -> "Exportar cruce con Matrícula (RUT)" => self.df_result_rut
-         -> "Exportar cruce con Refinanciamiento (RUT)" => se habilita tras el cruce anterior.
-    """
-    def __init__(self, parent, controller):
-        super().__init__(parent)
-        self.controller = controller
-        self.config(bg="#FFFFFF")
-
-        global df_licitados  # Se asume que existe en tu código principal
-
-        # DataFrames
-        self.df_extra = None         # Excel de refinanciamiento
-        self.df_csv_1 = None         # Archivo 1A
-        self.df_csv_2 = None         # Archivo 1B
-        self.df_result = None        # Cruce (1A+1B) con df_licitados
-
-        self.df_csv_rut = None       # NUEVO: Archivo "RUT" (1C)
-        self.df_result_rut = None    # Resultado de cruce (RUT con df_licitados)
-
-        #
-        # Layout base
-        #
-        for row_idx in range(10):
-            self.rowconfigure(row_idx, weight=1)
-        for col_idx in range(3):
-            self.columnconfigure(col_idx, weight=1)
-
-        tk.Label(
-            self, text="SOLICITUD DE MONTO",
-            font=("Arial", 16, "bold"), bg="#FFFFFF"
-        ).grid(row=0, column=0, columnspan=3, pady=10)
-
-        #
-        # 1) Cargar Refinanciamiento (df_extra)
-        #
-        self.btn_cargar_ref = tk.Button(
-            self, text="Cargar Excel Refinanciamiento", bg="#008000", fg="white",
-            command=self.load_file_refinanciamiento
-        )
-        self.btn_cargar_ref.grid(row=1, column=0, padx=5, pady=5)
-
-        self.label_file_ref = tk.Label(
-            self, text="Sin archivo refinanciamiento", bg="#FFFFFF"
-        )
-        self.label_file_ref.grid(row=1, column=1, columnspan=2, padx=5, pady=5, sticky="w")
-
-        #
-        # 2) Botones para cargar 1A y 1B
-        #
-        self.btn_cargar_1a = tk.Button(
-            self, text="Cargar Reporte 5A (1A)", bg="#107FFD", fg="white",
-            command=self.load_file_1a
-        )
-        self.btn_cargar_1a.grid(row=2, column=0, padx=5, pady=5)
-
-        self.label_file_1a = tk.Label(self, text="Sin archivo (1A)", bg="#FFFFFF")
-        self.label_file_1a.grid(row=2, column=1, padx=5, pady=5, sticky="w")
-
-        self.btn_cargar_1b = tk.Button(
-            self, text="Cargar Solicitud de Monto (1B)", bg="#107FFD", fg="white",
-            command=self.load_file_1b
-        )
-        self.btn_cargar_1b.grid(row=3, column=0, padx=5, pady=5)
-
-        self.label_file_1b = tk.Label(self, text="Sin archivo (1B)", bg="#FFFFFF")
-        self.label_file_1b.grid(row=3, column=1, padx=5, pady=5, sticky="w")
-
-        #
-        # 3) Exportar cruce con Matrícula (1A+1B con df_licitados)
-        #
-        self.btn_export_cruce_matricula = tk.Button(
-            self, text="Exportar cruce con Matrícula", bg="#cccccc", fg="white",
-            command=self.export_cruce_con_matricula
-        )
-        self.btn_export_cruce_matricula.grid(row=4, column=0, columnspan=2, pady=10)
-
-        #
-        # 4) Exportar cruce con Refinanciamiento (df_extra),
-        #    inicialmente deshabilitado hasta que se haga el cruce con Matrícula.
-        #
-        self.btn_export_cruce_refinanciamiento = tk.Button(
-            self, text="Exportar cruce c/Refinanciamiento", bg="#cccccc", fg="white",
-            state="disabled",
-            command=self.export_cruce_con_refinanciamiento
-        )
-        self.btn_export_cruce_refinanciamiento.grid(row=4, column=2, padx=5, pady=5)
-
-
-        # ─────────────────────────────────────────────────────────────────
-        # NUEVO: 5) BOTÓN PARA CARGAR ARCHIVO "RUT" (1C)
-        # ─────────────────────────────────────────────────────────────────
-        self.btn_cargar_rut = tk.Button(
-            self, text="Cargar RUT (1C)", bg="#107FFD", fg="white",
-            command=self.load_file_rut
-        )
-        self.btn_cargar_rut.grid(row=5, column=0, padx=5, pady=5)
-
-        self.label_file_rut = tk.Label(self, text="Sin archivo (RUT)", bg="#FFFFFF")
-        self.label_file_rut.grid(row=5, column=1, padx=5, pady=5, sticky="w")
-
-        # Botón para "Exportar cruce con Matrícula (RUT)"
-        self.btn_export_cruce_matricula_rut = tk.Button(
-            self, text="Exportar cruce con Matrícula (RUT)", bg="#cccccc", fg="white",
-            command=self.export_cruce_con_matricula_rut
-        )
-        self.btn_export_cruce_matricula_rut.grid(row=6, column=0, columnspan=2, pady=10)
-
-        # Botón para "Exportar cruce con Refinanciamiento (RUT)",
-        # inicialmente deshabilitado
-        self.btn_export_cruce_refinanciamiento_rut = tk.Button(
-            self, text="Exportar cruce c/Refinanciamiento (RUT)", bg="#cccccc", fg="white",
-            state="disabled",
-            command=self.export_cruce_con_refinanciamiento_rut
-        )
-        self.btn_export_cruce_refinanciamiento_rut.grid(row=6, column=2, padx=5, pady=5)
-
-
-        #
-        # Botón para volver
-        #
-        tk.Button(
-            self, text="Volver", bg="#aaaaaa", fg="white",
-            command=lambda: controller.show_frame("IngresaFrame")
-        ).grid(row=9, column=0, columnspan=3, pady=20)
-
-
-    # ======================================================
-    #   MÉTODO: Cargar Excel Refinanciamiento (df_extra)
-    # ======================================================
-    def load_file_refinanciamiento(self):
-        df_csv, file_path = read_any_file("Seleccionar Excel Refinanciamiento")
-        if df_csv is None:
-            return
-        if "RUT" not in df_csv.columns and "RUTALU" not in df_csv.columns:
-            messagebox.showerror("Error", "El archivo de refinanciamiento no contiene RUT/RUTALU.")
-            return
-
-        # Ajusta según tus columnas
-        df_csv["RUTALU"] = df_csv["RUTALU"].astype(str).str.strip()
-       # df_csv[["RUT","DV"]] = df_csv["RUTALU"].str.split("-", expand=True)
-        df_csv = df_csv.rename(columns={'RUTALU': 'RUT'})
-        self.df_extra = df_csv
-        self.label_file_ref.config(text=f"Refinanciamiento: {os.path.basename(file_path)}")
-        messagebox.showinfo("Cargado", f"Refinanciamiento con {len(df_csv)} filas.")
-
-
-    # ======================================================
-    #   MÉTODO: Cargar archivos 1A y 1B
-    # ======================================================
-    def load_file_1a(self):
-        df_csv, file_path = read_any_file("Seleccionar archivo 1A (Reporte 5A)")
-        if df_csv is None:
-            return
-        if "RUT" not in df_csv.columns:
-            messagebox.showerror("Error", "El archivo 1A no contiene 'RUT'.")
-            return
-        df_csv["RUT"] = df_csv["RUT"].astype(str).str.strip()
-        self.df_csv_1 = df_csv
-        self.label_file_1a.config(text=f"Archivo 1A: {os.path.basename(file_path)}")
-
-    def load_file_1b(self):
-        df_csv, file_path = read_any_file("Seleccionar archivo 1B (Reporte Solicitud de Monto)")
-        if df_csv is None:
-            return
-        if "RUT" not in df_csv.columns:
-            messagebox.showerror("Error", "El archivo 1B no contiene 'RUT'.")
-            return
-        df_csv["RUT"] = df_csv["RUT"].astype(str).str.strip()
-        self.df_csv_2 = df_csv
-        self.label_file_1b.config(text=f"Archivo 1B: {os.path.basename(file_path)}")
-
-
-    # ======================================================
-    #   MÉTODO: Exportar cruce con Matrícula (1A + 1B)
-    # ======================================================
-    def export_cruce_con_matricula(self):
-        if self.df_csv_1 is None or self.df_csv_2 is None:
-            messagebox.showwarning("Faltan archivos", "Por favor, carga 1A y 1B antes de exportar.")
-            return
-
-        global df_licitados
-        if df_licitados is None or df_licitados.empty:
-            messagebox.showwarning("Sin datos", "df_licitados está vacío.")
-            return
-        df_licitados["PORCENTAJE_AVANCE"] = df_licitados['PORCENTAJE_AVANCE'].round(0)
-        # Concatena y ajusta RUT
-        self.df_csv_1 = self.df_csv_1[self.df_csv_1['IES'] == '013']
-        df_concat = pd.merge(self.df_csv_1, self.df_csv_2, how="inner", on='RUT').drop_duplicates()
-        df_concat.drop_duplicates(subset='RUT', keep='first', inplace=True)
-        df_licitados["RUT"] = df_licitados["RUT"].astype(str).str.strip()
-        df_concat["RUT"] = df_concat["RUT"].astype(str).str.strip()
-        df_concat = df_concat[['RUT']]
-        # Merge con df_licitados
-        df_cruce = pd.merge(df_concat, df_licitados, on="RUT", how="inner")
-        if df_cruce.empty:
-            messagebox.showwarning("Cruce vacío", "No se encontraron coincidencias en el cruce con Matrícula.")
-            return
-
-        self.df_result = df_cruce  # Guardamos el resultado
-        self._save_df_to_excel(df_cruce, "Cruce_Matricula_1A_1B")
-
-        # Habilitamos el botón "Exportar cruce c/Refinanciamiento"
-        self.btn_export_cruce_refinanciamiento.config(
-            state="normal", bg="#107FFD"
-        )
-        messagebox.showinfo(
-            "Cruce con Matrícula",
-            "Exportado con éxito. Ahora puedes cruzar con Refinanciamiento (1A+1B)."
-        )
-
-
-    # ======================================================
-    #   MÉTODO: Exportar cruce con Refinanciamiento (1A+1B)
-    # ======================================================
-    def export_cruce_con_refinanciamiento(self):
-        if self.df_result is None or self.df_result.empty:
-            messagebox.showwarning("Sin datos", "Primero haz el cruce con Matrícula (1A+1B).")
-            return
-        if self.df_extra is None or self.df_extra.empty:
-            messagebox.showwarning("Sin datos", "No se ha cargado el Excel de refinanciamiento o está vacío.")
-            return
-        self.df_result["RUT"] = self.df_result["RUT"].astype(str).str.strip()
-        self.df_extra["RUT"] = self.df_extra["RUT"].astype(str).str.strip()
-        current_extra = self.df_extra[['RUT', 'DOCUMENTO','SALDO']]
-        df_cruce_ref = pd.merge(self.df_result, current_extra, on="RUT", how="inner")
-        if df_cruce_ref.empty:
-            messagebox.showwarning("Cruce vacío", "No hubo coincidencias con Refinanciamiento.")
-            return
-
-        self._save_df_to_excel(df_cruce_ref, "Cruce_Refinanciamiento")
-        messagebox.showinfo("Cruce con Refinanciamiento", "Exportado con éxito (1A+1B).")
-
-
-    # ─────────────────────────────────────────────────────────────────
-    #   NUEVO: Cargar RUT (1C) y sus cruces
-    # ─────────────────────────────────────────────────────────────────
-
-    def load_file_rut(self):
-        """
-        Carga el archivo RUT (1C).
-        """
-        df_csv, file_path = read_any_file("Seleccionar archivo RUT (1C)")
-        if df_csv is None:
-            return
-        if "RUT" not in df_csv.columns:
-            messagebox.showerror("Error", "El archivo RUT no contiene la columna 'RUT'.")
-            return
-
-        df_csv["RUT"] = df_csv["RUT"].astype(str).str.strip()
-        self.df_csv_rut = df_csv
-
-        self.label_file_rut.config(text=f"Archivo RUT: {os.path.basename(file_path)}")
-        messagebox.showinfo("Cargado", f"Archivo RUT con {len(df_csv)} filas.")
-
-    def export_cruce_con_matricula_rut(self):
-        """
-        Cruza el archivo RUT (1C) con df_licitados.
-        Luego habilita el botón de refinanciamiento para RUT.
-        """
-        if self.df_csv_rut is None:
-            messagebox.showwarning("Falta archivo RUT", "Primero carga el archivo RUT (1C).")
-            return
-        global df_licitados
-        if df_licitados is None or df_licitados.empty:
-            messagebox.showwarning("Sin datos", "df_licitados está vacío.")
-            return
-
-        df_licitados["PORCENTAJE_AVANCE"] = df_licitados['PORCENTAJE_AVANCE'].round(0)
-        df_licitados["RUT"] = df_licitados["RUT"].astype(str).str.strip()
-        self.df_csv_rut["RUT"] = self.df_csv_rut["RUT"].astype(str).str.strip()
-
-        df_cruce_rut = pd.merge(self.df_csv_rut, df_licitados, on="RUT", how="inner")
-        if df_cruce_rut.empty:
-            messagebox.showwarning("Cruce vacío", "No se encontraron coincidencias (RUT vs df_licitados).")
-            return
-
-        self.df_result_rut = df_cruce_rut  # Guardamos el resultado
-        self._save_df_to_excel(df_cruce_rut, "Cruce_Matricula_RUT")
-
-        # Habilitamos el botón de refinanciamiento para RUT
-        self.btn_export_cruce_refinanciamiento_rut.config(
-            state="normal", bg="#107FFD"
-        )
-        messagebox.showinfo(
-            "Cruce con Matrícula (RUT)",
-            "Exportado con éxito. Ahora puedes cruzar con Refinanciamiento (RUT)."
-        )
-
-    def export_cruce_con_refinanciamiento_rut(self):
-        """
-        Cruza self.df_result_rut con self.df_extra.
-        """
-        if self.df_result_rut is None or self.df_result_rut.empty:
-            messagebox.showwarning("Sin datos", "Primero haz el cruce con Matrícula (RUT).")
-            return
-        if self.df_extra is None or self.df_extra.empty:
-            messagebox.showwarning("Sin datos", "No se ha cargado el Excel de refinanciamiento o está vacío.")
-            return
-
-        self.df_result_rut["RUT"] = self.df_result_rut["RUT"].astype(str).str.strip()
-        self.df_extra["RUT"] = self.df_extra["RUT"].astype(str).str.strip()
-
-        df_cruce_rut_ref = pd.merge(self.df_result_rut, self.df_extra, on="RUT", how="inner")
-        if df_cruce_rut_ref.empty:
-            messagebox.showwarning("Cruce vacío", "No hubo coincidencias con Refinanciamiento (RUT).")
-            return
-
-        self._save_df_to_excel(df_cruce_rut_ref, "Cruce_Refinanciamiento_RUT")
-        messagebox.showinfo(
-            "Cruce con Refinanciamiento (RUT)",
-            "Exportado con éxito (RUT)."
-        )
-
-
-    # ======================================================
-    #   FUNCIÓN AUXILIAR PARA EXPORTAR A EXCEL
-    # ======================================================
-    def _save_df_to_excel(self, df, default_name: str):
-        file_path = filedialog.asksaveasfilename(
-            title="Guardar archivo Excel",
-            defaultextension=".xlsx",
-            filetypes=[("Excel Files", "*.xlsx")],
-            initialfile=f"{default_name}.xlsx"
-        )
-        if file_path:
-            try:
-                df.to_excel(file_path, index=False)
-                messagebox.showinfo("Exportado", f"Guardado en:\n{file_path}")
-            except Exception as e:
-                messagebox.showerror("Error", f"No se pudo exportar:\n{e}")
-        else:
-            messagebox.showinfo("Cancelado", "No se exportó el archivo.")
-
-
-class EgresadosFrame(tk.Frame):
-    """
-    Sub-proceso Egresados, con soporte para leer CSV/TXT/Excel
-    igual que en IngresaRenovantesFrame.
-    """
-    def __init__(self, parent, controller):
-        super().__init__(parent)
-        self.controller = controller
-        self.config(bg="#FFFFFF")
-        
-        # Conexión BD y DataFrame principal
-        self.connection = connection1  
-        self.df_egresados = None
-        self.run_query_egresados()
-
-        # DataFrames resultantes de cada “no cruce”
-        self.df_egresados_not_found_1 = None
-        self.df_egresados_not_found_2 = None
-        self.df_egresados_not_found_3 = None
-        self.df_egresados_not_found_4 = None
-
-        # Configurar grid
-        for row_idx in range(8):
-            self.rowconfigure(row_idx, weight=1)
-        for col_idx in range(3):
-            self.columnconfigure(col_idx, weight=1)
-
-        # Logo (opcional)
-    # ========== PATRÓN PARA OBTENER RUTA IMAGEN ========== 
-        if hasattr(sys, '_MEIPASS'):
-            # Cuando está empaquetado con PyInstaller
-            base_path = sys._MEIPASS
-        else:
-            # Cuando corres el .py “normal”
-            base_path = os.path.dirname(os.path.abspath(__file__))
-
-        # Unir la carpeta y archivo de imagen
-        logo_path = os.path.join(base_path, 'images', 'logo.png')
-        
-        # Cargar la imagen usando logo_path
-        try:
-            self.logo = tk.PhotoImage(file=logo_path)
-            tk.Label(self, image=self.logo, bg="#FFFFFF").grid(row=0, column=0, columnspan=3, pady=(10,10))
-        except Exception as e:
-            print(f"No se pudo cargar la imagen del logo: {e}")
-            tk.Label(self, text="[Logo Aquí]", bg="#FFFFFF", fg="#107FFD",
-                     font=("Arial", 12, "bold")).grid(row=0, column=0, columnspan=3, pady=(10,10))
-
-        # Título
-        tk.Label(
-            self, text="Sub-proceso: Egresados",
-            font=("Arial", 16, "bold"), bg="#FFFFFF"
-        ).grid(row=1, column=0, columnspan=3, pady=(10,10))
-
-        # ---------------------------
-        # Fila 2: Cargar #1
-        # ---------------------------
-        self.btn_cargar_1 = tk.Button(
-            self, text="Cargar CSV/TXT/Excel Egresados 5A #1", bg="#107FFD", fg="white",
-            command=self.load_file_egresados_1
-        )
-        self.btn_cargar_1.grid(row=2, column=0, padx=5, pady=5)
-
-        self.label_file_1 = tk.Label(self, text="Sin archivo (#1)", bg="#FFFFFF")
-        self.label_file_1.grid(row=2, column=1, padx=5, pady=5, sticky="w")
-
-        self.btn_export_1 = tk.Button(
-            self, text="Exportar NO Cruce #1", bg="#cccccc", fg="white",
-            command=self.export_egresados_1
-        )
-        self.btn_export_1.grid(row=2, column=2, padx=5, pady=5)
-
-        # ---------------------------
-        # Fila 3: Cargar #2
-        # ---------------------------
-        self.btn_cargar_2 = tk.Button(
-            self, text="Cargar CSV/TXT/Excel Egresados 5B #2", bg="#107FFD", fg="white",
-            command=self.load_file_egresados_2
-        )
-        self.btn_cargar_2.grid(row=3, column=0, padx=5, pady=5)
-
-        self.label_file_2 = tk.Label(self, text="Sin archivo (#2)", bg="#FFFFFF")
-        self.label_file_2.grid(row=3, column=1, padx=5, pady=5, sticky="w")
-
-        self.btn_export_2 = tk.Button(
-            self, text="Exportar NO Cruce #2", bg="#cccccc", fg="white",
-            command=self.export_egresados_2
-        )
-        self.btn_export_2.grid(row=3, column=2, padx=5, pady=5)
-
-        # ---------------------------
-        # Fila 4: Cargar #3
-        # ---------------------------
-        self.btn_cargar_3 = tk.Button(
-            self, text="Cargar CSV/TXT/Excel Egresados DESERTORES #3", bg="#107FFD", fg="white",
-            command=self.load_file_egresados_3
-        )
-        self.btn_cargar_3.grid(row=4, column=0, padx=5, pady=5)
-
-        self.label_file_3 = tk.Label(self, text="Sin archivo (#3)", bg="#FFFFFF")
-        self.label_file_3.grid(row=4, column=1, padx=5, pady=5, sticky="w")
-
-        self.btn_export_3 = tk.Button(
-            self, text="Exportar NO Cruce #3", bg="#cccccc", fg="white",
-            command=self.export_egresados_3
-        )
-        self.btn_export_3.grid(row=4, column=2, padx=5, pady=5)
-
-        # ---------------------------
-        # Fila 5: Cargar #4
-        # ---------------------------
-        self.btn_cargar_4 = tk.Button(
-            self, text="Cargar CSV/TXT/Excel para comparar #1,#2,#3", bg="#107FFD", fg="white",
-            command=self.load_file_vs_no_cruces
-        )
-        self.btn_cargar_4.grid(row=5, column=0, padx=5, pady=5)
-
-        self.label_file_4 = tk.Label(self, text="Sin archivo (#4)", bg="#FFFFFF")
-        self.label_file_4.grid(row=5, column=1, padx=5, pady=5, sticky="w")
-
-        self.btn_export_4 = tk.Button(
-            self, text="Exportar NO Cruce #4", bg="#cccccc", fg="white",
-            command=self.export_vs_no_cruces
-        )
-        self.btn_export_4.grid(row=5, column=2, padx=5, pady=5)
-
-        # ---------------------------
-        # Botón Volver (fila 6)
-        # ---------------------------
-        tk.Button(
-            self, text="Volver", bg="#aaaaaa", fg="white",
-            command=lambda: controller.show_frame("IngresaFrame")
-        ).grid(row=6, column=0, columnspan=3, pady=(20,10))
-
-
-    # ----------------------------------------------------------
-    #  Ejecuta query en la BD y carga self.df_egresados
-    # ----------------------------------------------------------
-    def run_query_egresados(self):
-        query = text("""
-                        select
-                            b.RUT,
-                            c.DV, 
-                            a.CODCLI,
-                            CODIGO_SIES_COMPLETO,
-                            PATERNO, 
-                            MATERNO, 
-                            NOMBRES, 
-                            GENERO, 
-                            c.FECH_NAC,
-                            DIRECCION,
-                            NACIONALIDAD,
-                            (SELECT TOP 1 X.CODIGO_CIUDAD FROM dim_territorio_ingresa X WHERE X.CODIGO_COMUNA=I.COD_COMUNA) COD_CIUDAD,
-                            (SELECT TOP 1 X.CODIGO_COMUNA FROM dim_territorio_ingresa X WHERE X.CODIGO_COMUNA=I.COD_COMUNA) COD_COMUNA, 
-                            (SELECT TOP 1 X.CODIGO_REGION FROM dim_territorio_ingresa X WHERE X.CODIGO_COMUNA=I.COD_COMUNA) COD_REGION,
-                            c.TELEFONO, 
-                            c.MAIL_UNIACC, 
-                            FECHA_EGRESO,
-                            pm.PERIODO as ANO_COHORTE,
-                            pm.PERIODO as ANO_INGRESO_INSTITUCION,
-                            d.NOMBRE_CARRERA,
-                                1 as 'CODIGO_TIPO_IES',
-                                13  as 'CODIGO_DE_IES',
-                                j.SEDEN_COD  as 'CODIGO_DE_SEDE',
-                                j.CARRN_COD  as 'CODIGO_CARRERA',
-                                j.JORNN_COD  as 'CODIGO_JORNADA', 
-                                    CASE WHEN j.JORNN_COD=1 THEN 'Diurno' ELSE 'Vespertino/Semipresencial/Online'END AS 'JORNADA',
-                            F.ARANCEL_ANUAL AS 'ARANCEL_REAL_ANUAL',
-                            0 AS 'ARANCEL DE REFERENCIA',FECHA_MAT -- SE CARGA A MANO POSTERIOR A LA GENERACIÓN DEL ARCHIVO EXCEL-SE INCORPORA FECHA MAT
-                        from ft_egreso a
-                        left join (select distinct CODCLI, PERIODO from ft_matricula where MAT_N = 1 ) pm on a.codcli = pm.codcli
-                        inner join dim_matricula b on a.CODCLI = b.CODCLI
-                        inner join dim_alumno c on b.RUT = c.RUT
-                        inner join dim_plan_academico d on b.CODPLAN = d.LLAVE_MALLA
-                        inner join (select  CODIGO_SIES, ARANCEL_ANUAL,
-                                            ROW_NUMBER() over (partition by CODIGO_SIES order by periodo desc )	as numero
-                                            from dim_oferta_academica) f  on d.CODIGO_SIES_COMPLETO = f.CODIGO_SIES and numero = 1
-                        left join dim_territorio i on c.COMUNA=i.COMUNA
-                        left join (select distinct [CODIGO SIES SIN VERSION], SEDEN_COD, CARRN_COD, JORNN_COD, NOMBRE_CARRERA,
-                                ROW_NUMBER() over (partition by [CODIGO SIES SIN VERSION] order by[CODIGO SIES SIN VERSION] )	as numero
-                                    from oferta_academica_ingresa where carrera_discontinua = 'NO'	) j
-                        on left (d.CODIGO_SIES_COMPLETO,LEN (d.CODIGO_SIES_COMPLETO)-2)=j.[CODIGO SIES SIN VERSION]
-                        inner join (select CODCLI, FECHA_MAT,    
-                                ROW_NUMBER() OVER (partition by CODCLI ORDER BY FECHA_MAT DESC) AS numero
-                                from ft_matricula) fm on a.CODCLI = fm.CODCLI and fm.numero = 1
-                        where 1 = 1
-                        and d.NIVEL_GLOBAL = 'PREGRADO'
-                        and CODIGO_SIES_COMPLETO <> '0'		
-        """)
-        try:
-            if self.connection is not None:
-                self.df_egresados = pd.read_sql_query(query, self.connection)
-                print("Query ejecutada y df_egresados cargado correctamente.")
-            else:
-                print("No se ejecutó la query: conexión no proporcionada.")
-        except Exception as e:
-            print(f"Error al ejecutar query: {e}")
-
-    # ----------------------------------------------------------------
-    # 1) LOAD #1: Cargar archivo y ver qué RUT NO están en self.df_egresados
-    # ----------------------------------------------------------------
-    def load_file_egresados_1(self):
-        df_loaded, file_path = read_any_file("Seleccionar CSV/TXT/Excel Egresados #1")
-        if df_loaded is None:
-            return  # usuario canceló o error
-
-        if "RUT" not in df_loaded.columns:
-            messagebox.showerror("Error", "El archivo #1 no contiene la columna 'RUT'.")
-            return
-
-        self.label_file_1.config(text=f"Archivo #1: {os.path.basename(file_path)}")
-
-        # Nos aseguramos de que existan datos en df_egresados
-        if self.df_egresados is None or self.df_egresados.empty:
-            messagebox.showwarning("Sin datos", "self.df_egresados está vacío.")
-            return
-
-        # Ajustar tipos a string
-        df_loaded["RUT"] = df_loaded["RUT"].astype(str)
-        self.df_egresados["RUT"] = self.df_egresados["RUT"].astype(str)
-
-        # Merge (left) e identificamos los RUT que NO existen en df_egresados
-        df_result = pd.merge(
-            df_loaded,
-            self.df_egresados[["RUT"]],
-            on="RUT",
-            how="left",
-            indicator=True
-        )
-        # Filtramos los left_only => no cruzan
-        df_result = df_result[df_result["_merge"] == "left_only"].drop(columns="_merge")
-
-        self.df_egresados_not_found_1 = df_result
-
-        # Cambiamos color del botón export a azul (indica que hay datos)
-        self.btn_export_1.config(bg="#107FFD")
-
-        messagebox.showinfo(
-            "Cargado",
-            f"Archivo #1 cargado. {len(df_result)} filas no cruzan con df_egresados."
-        )
-
-    def export_egresados_1(self):
-        if self.df_egresados_not_found_1 is None:
-            messagebox.showwarning("Sin datos", "No hay datos para exportar (#1).")
-            return
-        self._save_df_to_excel(self.df_egresados_not_found_1, "Egresados_NO_Cruce_1")
-
-    # ----------------------------------------------------------------
-    # 2) LOAD #2
-    # ----------------------------------------------------------------
-    def load_file_egresados_2(self):
-        df_loaded, file_path = read_any_file("Seleccionar CSV/TXT/Excel Egresados #2")
-        if df_loaded is None:
-            return
-
-        if "RUT" not in df_loaded.columns:
-            messagebox.showerror("Error", "El archivo #2 no contiene la columna 'RUT'.")
-            return
-
-        self.label_file_2.config(text=f"Archivo #2: {os.path.basename(file_path)}")
-
-        if self.df_egresados is None or self.df_egresados.empty:
-            messagebox.showwarning("Sin datos", "self.df_egresados está vacío.")
-            return
-
-        df_loaded["RUT"] = df_loaded["RUT"].astype(str)
-        self.df_egresados["RUT"] = self.df_egresados["RUT"].astype(str)
-
-        df_result = pd.merge(
-            df_loaded,
-            self.df_egresados[["RUT"]],
-            on="RUT",
-            how="left",
-            indicator=True
-        )
-        df_result = df_result[df_result["_merge"] == "left_only"].drop(columns="_merge")
-
-        self.df_egresados_not_found_2 = df_result
-        self.btn_export_2.config(bg="#107FFD")
-
-        messagebox.showinfo(
-            "Cargado",
-            f"Archivo #2 cargado. {len(df_result)} filas no cruzan con df_egresados."
-        )
-
-    def export_egresados_2(self):
-        if self.df_egresados_not_found_2 is None:
-            messagebox.showwarning("Sin datos", "No hay datos para exportar (#2).")
-            return
-        self._save_df_to_excel(self.df_egresados_not_found_2, "Egresados_NO_Cruce_2")
-
-    # ----------------------------------------------------------------
-    # 3) LOAD #3
-    # ----------------------------------------------------------------
-    def load_file_egresados_3(self):
-        df_loaded, file_path = read_any_file("Seleccionar CSV/TXT/Excel Egresados #3")
-        if df_loaded is None:
-            return
-
-        if "RUT" not in df_loaded.columns:
-            messagebox.showerror("Error", "El archivo #3 no contiene la columna 'RUT'.")
-            return
-
-        self.label_file_3.config(text=f"Archivo #3: {os.path.basename(file_path)}")
-
-        if self.df_egresados is None or self.df_egresados.empty:
-            messagebox.showwarning("Sin datos", "self.df_egresados está vacío.")
-            return
-
-        df_loaded["RUT"] = df_loaded["RUT"].astype(str)
-        self.df_egresados["RUT"] = self.df_egresados["RUT"].astype(str)
-
-        df_result = pd.merge(
-            df_loaded,
-            self.df_egresados[["RUT"]],
-            on="RUT",
-            how="left",
-            indicator=True
-        )
-        df_result = df_result[df_result["_merge"] == "left_only"].drop(columns="_merge")
-
-        self.df_egresados_not_found_3 = df_result
-        self.btn_export_3.config(bg="#107FFD")
-
-        messagebox.showinfo(
-            "Cargado",
-            f"Archivo #3 cargado. {len(df_result)} filas no cruzan con df_egresados."
-        )
-
-    def export_egresados_3(self):
-        if self.df_egresados_not_found_3 is None:
-            messagebox.showwarning("Sin datos", "No hay datos para exportar (#3).")
-            return
-        self._save_df_to_excel(self.df_egresados_not_found_3, "Egresados_NO_Cruce_3")
-
-    # ----------------------------------------------------------------
-    # 4) LOAD #4: Comparar vs. NO CRUCES #1, #2, #3
-    # ----------------------------------------------------------------
-    def load_file_vs_no_cruces(self):
-        df_loaded, file_path = read_any_file("Seleccionar CSV/TXT/Excel para comparar #1,#2,#3")
-        if df_loaded is None:
-            return
-
-        if "RUT" not in df_loaded.columns:
-            messagebox.showerror("Error", "El archivo #4 no contiene la columna 'RUT'.")
-            return
-
-        self.label_file_4.config(text=f"Archivo #4: {os.path.basename(file_path)}")
-
-        # Juntamos los dataframes de no cruce (1,2,3) que existan
-        frames_no_cruce = []
-        if self.df_egresados_not_found_1 is not None:
-            frames_no_cruce.append(self.df_egresados_not_found_1[["RUT"]])
-        if self.df_egresados_not_found_2 is not None:
-            frames_no_cruce.append(self.df_egresados_not_found_2[["RUT"]])
-        if self.df_egresados_not_found_3 is not None:
-            frames_no_cruce.append(self.df_egresados_not_found_3[["RUT"]])
-
-        if not frames_no_cruce:
-            messagebox.showinfo("Sin cruces previos", "No hay datos de #1,#2,#3 para comparar.")
-            return
-
-        df_no_cruces_union = pd.concat(frames_no_cruce, ignore_index=True).drop_duplicates()
-
-        df_loaded["RUT"] = df_loaded["RUT"].astype(str)
-        df_result = pd.merge(
-            df_loaded,
-            df_no_cruces_union,
-            on="RUT",
-            how="left",
-            indicator=True
-        )
-        df_result = df_result[df_result["_merge"] == "left_only"].drop(columns="_merge")
-
-        self.df_egresados_not_found_4 = df_result
-        self.btn_export_4.config(bg="#107FFD")
-
-        messagebox.showinfo(
-            "Cargado",
-            f"Archivo #4 cargado. {len(df_result)} filas NO se cruzan con salidas #1,#2,#3."
-        )
-
-    def export_vs_no_cruces(self):
-        if self.df_egresados_not_found_4 is None:
-            messagebox.showwarning("Sin datos", "No hay datos para exportar (#4).")
-            return
-        self._save_df_to_excel(self.df_egresados_not_found_4, "Egresados_NO_Cruce_4")
-
-    # ----------------------------------------------------------------
-    #  FUNCIÓN AUXILIAR PARA EXPORTAR A EXCEL
-    # ----------------------------------------------------------------
-    def _save_df_to_excel(self, df: pd.DataFrame, default_name: str):
-        file_path = filedialog.asksaveasfilename(
-            title="Guardar archivo Excel",
-            defaultextension=".xlsx",
-            filetypes=[("Excel Files", "*.xlsx")],
-            initialfile=f"{default_name}.xlsx"
-        )
-        if file_path:
-            try:
-                df.to_excel(file_path, index=False)
-                messagebox.showinfo("Exportado", f"Se guardó el archivo en:\n{file_path}")
-            except Exception as e:
-                messagebox.showerror("Error", f"No se pudo exportar:\n{e}")
-        else:
-            messagebox.showinfo("Cancelado", "No se exportó el archivo.")
+#=================================FIN CLASS=========================================
 
 # ============================================================== 
 #                   CLASE PRINCIPAL (App)
